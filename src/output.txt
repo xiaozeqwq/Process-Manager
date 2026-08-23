@@ -1,0 +1,3622 @@
+./main/java/com/xiaoze_qwq_/mis/client/gui/ChartDataTracker.java
+package com.xiaoze_qwq_.mis.client.gui;
+
+import java.util.LinkedList;
+
+/**
+ * å›¾è¡¨æ•°æ®è¿½è¸ªå™¨ï¼Œç”¨äºå­˜å‚¨å†å²æ•°æ®ç‚¹ï¼ˆæœ€å¤š 60 ä¸ªç‚¹ï¼‰
+ */
+public class ChartDataTracker {
+    private static final int MAX_POINTS = 60;
+    
+    private final LinkedList<Double> downloadSpeeds = new LinkedList<>();
+    private final LinkedList<Double> uploadSpeeds = new LinkedList<>();
+    private final LinkedList<Double> cpuUsages = new LinkedList<>();
+    private final LinkedList<Double> memoryUsages = new LinkedList<>();
+
+    /**
+     * æ·»åŠ ä¸€ç»„æ–°çš„æ•°æ®ç‚¹
+     * @param download ä¸‹è½½é€Ÿåº¦ (KB/s)
+     * @param upload ä¸Šä¼ é€Ÿåº¦ (KB/s)
+     * @param cpu CPU å ç”¨ç‡ (%)
+     * @param memory å†…å­˜å ç”¨ (MB)
+     */
+    public synchronized void addDataPoint(double download, double upload, double cpu, double memory) {
+        addToQueue(downloadSpeeds, download);
+        addToQueue(uploadSpeeds, upload);
+        addToQueue(cpuUsages, cpu);
+        addToQueue(memoryUsages, memory);
+    }
+
+    private void addToQueue(LinkedList<Double> queue, double value) {
+        queue.add(value);
+        if (queue.size() > MAX_POINTS) {
+            queue.removeFirst();
+        }
+    }
+
+    public synchronized LinkedList<Double> getDownloadSpeeds() { return new LinkedList<>(downloadSpeeds); }
+    public synchronized LinkedList<Double> getUploadSpeeds() { return new LinkedList<>(uploadSpeeds); }
+    public synchronized LinkedList<Double> getCpuUsages() { return new LinkedList<>(cpuUsages); }
+    public synchronized LinkedList<Double> getMemoryUsages() { return new LinkedList<>(memoryUsages); }
+    
+    public synchronized boolean isEmpty() {
+        return downloadSpeeds.isEmpty();
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/client/gui/MCCImmersiveScreen.java
+package com.xiaoze_qwq_.mis.client.gui;
+
+import com.xiaoze_qwq_.mis.network.ImmersiveExitPacket;
+import com.xiaoze_qwq_.mis.network.ImmersiveInputPacket;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.Component;
+import net.neoforged.neoforge.network.PacketDistributor;
+import org.lwjgl.glfw.GLFW;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+public class MCCImmersiveScreen extends Screen {
+    private static final Map<String, List<Component>> instanceLines = new ConcurrentHashMap<>();
+    private static final int MAX_LINES = 1000;
+
+    private String currentInstanceId;
+    private boolean canInput;
+    private EditBox inputField;
+    private int scrollOffset = 0;
+    private int textAreaTop, textAreaBottom;
+    private int lineHeight;
+    private boolean isDraggingScrollbar = false;
+
+    private List<String> availableInstances = new ArrayList<>();
+
+    public MCCImmersiveScreen(String instanceId, boolean canInput) {
+        super(Component.translatable("mis.immersive.window_title"));
+        this.currentInstanceId = instanceId;
+        this.canInput = canInput;
+        instanceLines.putIfAbsent(instanceId, Collections.synchronizedList(new ArrayList<>()));
+        instanceLines.keySet().forEach(id -> { if (!id.equals(instanceId)) availableInstances.add(id); });
+    }
+
+    public static void addLine(String instanceId, Component line) {
+        List<Component> lines = instanceLines.computeIfAbsent(instanceId, k -> Collections.synchronizedList(new ArrayList<>()));
+        lines.add(line);
+        while (lines.size() > MAX_LINES) lines.remove(0);
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.screen instanceof MCCImmersiveScreen screen && screen.currentInstanceId.equals(instanceId)) {
+            screen.updateScrollIfAtBottom();
+        }
+    }
+
+    public static void clearInstanceLines(String instanceId) {
+        instanceLines.remove(instanceId);
+    }
+
+    public String getCurrentInstanceId() { return currentInstanceId; }
+
+    public void switchToInstance(String instanceId, boolean canInput) {
+        if (!this.currentInstanceId.equals(instanceId)) {
+            this.currentInstanceId = instanceId;
+            this.canInput = canInput;
+            this.scrollOffset = 0;
+            instanceLines.putIfAbsent(instanceId, Collections.synchronizedList(new ArrayList<>()));
+            if (inputField != null) {
+                inputField.setEditable(canInput);
+                if (canInput) inputField.setFocused(true);
+            }
+            availableInstances.clear();
+            instanceLines.keySet().forEach(id -> { if (!id.equals(instanceId)) availableInstances.add(id); });
+        } else {
+            this.canInput = canInput;
+            if (inputField != null) {
+                inputField.setEditable(canInput);
+            }
+        }
+    }
+
+    @Override
+    protected void init() {
+        lineHeight = this.font.lineHeight + 2;
+        int bw = 100, bh = 20;
+        this.addRenderableWidget(Button.builder(Component.translatable("mis.immersive.close_button"), b -> onClose())
+                .bounds(this.width - bw - 10, this.height - bh - 10, bw, bh).build());
+
+        if (canInput) {
+            int inputHeight = 20;
+            int inputY = this.height - inputHeight - 10;
+            inputField = new EditBox(this.font, 10, inputY, this.width - 20, inputHeight, Component.literal(""));
+            inputField.setMaxLength(256);
+            inputField.setEditable(true);
+            inputField.setFocused(true);
+            this.addRenderableWidget(inputField);
+            this.setInitialFocus(inputField);
+        }
+    }
+
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (keyCode == GLFW.GLFW_KEY_ENTER && canInput && inputField != null && inputField.isFocused()) {
+            String command = inputField.getValue();
+            if (!command.isEmpty()) {
+                PacketDistributor.sendToServer(new ImmersiveInputPacket(currentInstanceId, command));
+                inputField.setValue("");
+            }
+            return true;
+        }
+        return super.keyPressed(keyCode, scanCode, modifiers);
+    }
+
+    @Override
+    public void render(GuiGraphics gui, int mouseX, int mouseY, float partialTick) {
+        this.renderBackground(gui, mouseX, mouseY, partialTick);
+        super.render(gui, mouseX, mouseY, partialTick);
+
+        textAreaTop = 10;
+        int inputAreaHeight = canInput ? 30 : 10;
+        textAreaBottom = this.height - 40 - inputAreaHeight;
+        int leftMargin = 10, rightMargin = this.width - 10;
+
+        gui.fill(leftMargin - 2, textAreaTop - 2, rightMargin + 2, textAreaTop - 1, 0xFFAAAAAA);
+        gui.fill(leftMargin - 2, textAreaBottom + 1, rightMargin + 2, textAreaBottom + 2, 0xFFAAAAAA);
+        gui.fill(leftMargin - 2, textAreaTop - 2, leftMargin - 1, textAreaBottom + 2, 0xFFAAAAAA);
+        gui.fill(rightMargin + 1, textAreaTop - 2, rightMargin + 2, textAreaBottom + 2, 0xFFAAAAAA);
+
+        List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
+        int y = textAreaTop;
+        int visibleLines = (textAreaBottom - textAreaTop) / lineHeight;
+        int totalLines = lines.size();
+        int maxScroll = Math.max(0, totalLines - visibleLines);
+        scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
+        int start = Math.max(0, totalLines - visibleLines - scrollOffset);
+        int end = Math.min(totalLines, start + visibleLines + 1);
+
+        for (int i = start; i < end; i++) {
+            gui.drawString(this.font, lines.get(i), leftMargin, y, 0xFFFFFF, false);
+            y += lineHeight;
+        }
+
+        if (totalLines > visibleLines) {
+            int barWidth = 8;
+            int barX = this.width - barWidth - 4;
+            int trackHeight = textAreaBottom - textAreaTop;
+            int barHeight = Math.max(20, (int)((float)visibleLines / totalLines * trackHeight));
+            int barPos = (int)((float)scrollOffset / maxScroll * (trackHeight - barHeight));
+            barPos = Math.max(0, Math.min(barPos, trackHeight - barHeight));
+            gui.fill(barX, textAreaTop, barX + barWidth, textAreaBottom, 0x44000000);
+            gui.fill(barX, textAreaTop + barPos, barX + barWidth, textAreaTop + barPos + barHeight, 0xFFAAAAAA);
+            if (isDraggingScrollbar) {
+                float percent = (float)(mouseY - textAreaTop) / (trackHeight - barHeight);
+                scrollOffset = (int)(percent * maxScroll);
+                scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
+            }
+        }
+
+        if (canInput) {
+            gui.drawString(this.font, "> ", 10, textAreaBottom + 5, 0xAAAAAA, false);
+        }
+    }
+
+    private void updateScrollIfAtBottom() {
+        if (isAtBottom()) scrollToBottom();
+    }
+
+    private boolean isAtBottom() {
+        List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
+        int visible = (textAreaBottom - textAreaTop) / lineHeight;
+        if (visible <= 0) return true;
+        int max = Math.max(0, lines.size() - visible);
+        return scrollOffset >= max;
+    }
+
+    private void scrollToBottom() {
+        List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
+        int visible = (textAreaBottom - textAreaTop) / lineHeight;
+        scrollOffset = Math.max(0, lines.size() - visible);
+    }
+
+    @Override
+    public void onClose() {
+        if (Minecraft.getInstance().getConnection() != null) {
+            PacketDistributor.sendToServer(new ImmersiveExitPacket(currentInstanceId));
+        }
+        super.onClose();
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/client/gui/StatusScreen.java
+package com.xiaoze_qwq_.mis.client.gui;
+
+import com.xiaoze_qwq_.mis.network.StatusDataPacket;
+import com.xiaoze_qwq_.mis.network.StatusRequestPacket;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.Component;
+import net.neoforged.neoforge.network.PacketDistributor;
+
+import java.util.LinkedList;
+
+public class StatusScreen extends Screen {
+    private static final int REFRESH_SECONDS = 2;
+    private final String instanceId;
+    private final ChartDataTracker dataTracker = new ChartDataTracker();
+
+    private String mccUptime = "N/A";
+    private boolean mccRunning = false;
+    private double currentCpu = 0;
+    private long currentMemory = 0;
+    private double currentDownload = 0;
+    private double currentUpload = 0;
+    private long totalRxMB = 0, totalTxMB = 0;
+
+    private int scrollY = 0;
+    private int totalContentHeight;
+    private int visibleHeight;
+    private static final int CHART_HEIGHT = 100;
+    private static final int CHART_MARGIN = 20;
+    private static final int CHART_WIDTH = 500;
+    private int chartLeft, chartRight;
+    private long lastRenderTime = 0, lastRequestTime = 0;
+
+    public StatusScreen(String instanceId) {
+        super(Component.translatable("mis.status.window_title"));
+        this.instanceId = instanceId;
+    }
+
+    public String getInstanceId() {
+        return instanceId;
+    }
+
+    @Override
+    protected void init() {
+        this.addRenderableWidget(Button.builder(Component.translatable("mis.status.close_button"), b -> this.onClose())
+                .bounds(this.width - 90, this.height - 25, 80, 20).build());
+        requestStatus();
+        chartLeft = (this.width - CHART_WIDTH) / 2;
+        chartRight = chartLeft + CHART_WIDTH;
+        int textHeight = 20 + 15 + 12 + 12 + 20;
+        totalContentHeight = textHeight + 4 * (CHART_HEIGHT + CHART_MARGIN);
+        visibleHeight = this.height - 25;
+    }
+
+    @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        if (scrollY != 0) {
+            int maxScroll = Math.max(0, totalContentHeight - visibleHeight);
+            this.scrollY -= scrollY * 20;
+            this.scrollY = Math.max(0, Math.min(this.scrollY, maxScroll));
+            return true;
+        }
+        return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
+    }
+
+    @Override
+    public void tick() {
+        if (System.currentTimeMillis() - lastRequestTime >= REFRESH_SECONDS * 1000L)
+            requestStatus();
+    }
+
+    private void requestStatus() {
+        lastRequestTime = System.currentTimeMillis();
+        if (Minecraft.getInstance().getConnection() != null)
+            PacketDistributor.sendToServer(new StatusRequestPacket(instanceId));
+    }
+
+    public void updateStatus(StatusDataPacket data) {
+        this.mccRunning = data.mccRunning();
+        this.mccUptime = data.mccUptime();
+        this.currentCpu = data.cpuUsage();
+        this.currentMemory = data.memoryMB();
+        this.currentDownload = data.downloadSpeedKBps();
+        this.currentUpload = data.uploadSpeedKBps();
+        this.totalRxMB = data.totalRxMB();
+        this.totalTxMB = data.totalTxMB();
+        if (mccRunning) dataTracker.addDataPoint(currentDownload, currentUpload, currentCpu, currentMemory);
+    }
+
+    @Override
+    public void render(GuiGraphics gui, int mouseX, int mouseY, float partialTick) {
+        long now = System.currentTimeMillis();
+        if (now - lastRenderTime < 50 && lastRenderTime != 0) { /* skip excessive rendering */ }
+        lastRenderTime = now;
+
+        this.renderBackground(gui, mouseX, mouseY, partialTick);
+        super.render(gui, mouseX, mouseY, partialTick);
+
+        gui.enableScissor(0, 0, this.width, this.height - 25);
+        int baseY = 20 - scrollY;
+
+        int leftMargin = 20;
+        gui.drawString(this.font, Component.literal("Instance: " + instanceId), leftMargin, baseY, 0xFFFFFF, false);
+        baseY += 15;
+        gui.drawString(this.font, Component.translatable("mis.status.uptime", mccUptime), leftMargin, baseY, 0xAAAAAA, false);
+        baseY += 12;
+        gui.drawString(this.font, Component.translatable("mis.status.total_traffic", totalRxMB, totalTxMB), leftMargin, baseY, 0xAAAAAA, false);
+        baseY += 12;
+        String line = String.format("%s: â†“%.1f KB/s â†‘%.1f KB/s | %s: %.1f%% | %s: %.1f MB",
+                Component.translatable("mis.status.network_speed").getString(),
+                currentDownload, currentUpload,
+                Component.translatable("mis.status.cpu").getString(), currentCpu,
+                Component.translatable("mis.status.memory").getString(), (double) currentMemory);
+        gui.drawString(this.font, line, leftMargin, baseY, 0xCCCCCC, false);
+
+        int chartStartY = baseY + 20 + 15 + 12 + 12 + 20;
+        drawChart(gui, chartStartY, dataTracker.getDownloadSpeeds(), "Download (KB/s)", 0xFF3399FF);
+        drawChart(gui, chartStartY + CHART_HEIGHT + CHART_MARGIN, dataTracker.getUploadSpeeds(), "Upload (KB/s)", 0xFFFF3333);
+        drawChart(gui, chartStartY + 2 * (CHART_HEIGHT + CHART_MARGIN), dataTracker.getCpuUsages(), "CPU (%)", 0xFF33FF33);
+        drawChart(gui, chartStartY + 3 * (CHART_HEIGHT + CHART_MARGIN), dataTracker.getMemoryUsages(), "Memory (MB)", 0xFFFFAA33);
+
+        gui.disableScissor();
+        if (totalContentHeight > visibleHeight) {
+            int barHeight = Math.max(30, visibleHeight * visibleHeight / totalContentHeight);
+            int barY = (int) ((double) scrollY / (totalContentHeight - visibleHeight) * (visibleHeight - barHeight));
+            gui.fill(this.width - 8, barY, this.width - 4, barY + barHeight, 0xFF888888);
+        }
+    }
+
+    private void drawChart(GuiGraphics gui, int chartY, LinkedList<Double> data, String title, int color) {
+        if (chartY + CHART_HEIGHT < 0 || chartY > this.height) return;
+        int plotTop = chartY + 20, plotBottom = chartY + CHART_HEIGHT - 25;
+        int plotLeft = chartLeft + 40, plotRight = chartRight - 20;
+        double maxVal = calcMax(data);
+
+        gui.fill(chartLeft, chartY, chartRight, chartY + 1, 0xFFAAAAAA);
+        gui.fill(chartLeft, chartY + CHART_HEIGHT - 1, chartRight, chartY + CHART_HEIGHT, 0xFFAAAAAA);
+        gui.fill(chartLeft, chartY, chartLeft + 1, chartY + CHART_HEIGHT, 0xFFAAAAAA);
+        gui.fill(chartRight - 1, chartY, chartRight, chartY + CHART_HEIGHT, 0xFFAAAAAA);
+
+        gui.fill(plotLeft, plotTop, plotRight, plotBottom, 0xFF2D2D2D);
+        for (int i = 0; i <= 4; i++) {
+            int y = plotTop + (plotBottom - plotTop) * i / 4;
+            gui.fill(plotLeft, y, plotRight, y + 1, 0xFF555555);
+        }
+        gui.drawString(this.font, title, chartLeft + 5, chartY + 5, 0xFFFFFF, false);
+        gui.drawString(this.font, String.format("%.0f", maxVal), plotLeft - 30, plotTop - 4, 0xAAAAAA, false);
+        gui.drawString(this.font, "0", plotLeft - 20, plotBottom - 4, 0xAAAAAA, false);
+        if (data.size() >= 2) {
+            drawPolyline(gui, data, plotLeft, plotRight, plotTop, plotBottom, maxVal, color);
+        } else {
+            gui.drawString(this.font, Component.translatable("mis.status.chart_loading"), plotLeft + 10, plotTop + 40, 0xFF6666, false);
+        }
+    }
+
+    private double calcMax(LinkedList<Double> data) {
+        if (data.isEmpty()) return 100;
+        double max = 0;
+        for (double v : data) if (v > max) max = v;
+        double ext = max * 1.2;
+        int step = ext <= 200 ? 10 : 50;
+        return Math.ceil(ext / step) * step;
+    }
+
+    private void drawPolyline(GuiGraphics gui, LinkedList<Double> data, int left, int right, int top, int bottom, double max, int color) {
+        int n = data.size();
+        int prevX = -1, prevY = -1;
+        for (int i = 0; i < n; i++) {
+            double val = data.get(i);
+            int x = left + (right - left) * i / (n - 1);
+            int y = bottom - (int) ((val / max) * (bottom - top));
+            y = Math.max(top, Math.min(bottom, y));
+            if (prevX != -1) drawLine(gui, prevX, prevY, x, y, color);
+            gui.fill(x - 1, y - 1, x + 1, y + 1, color);
+            prevX = x;
+            prevY = y;
+        }
+    }
+
+    private void drawLine(GuiGraphics gui, int x1, int y1, int x2, int y2, int color) {
+        int dx = Math.abs(x2 - x1), dy = Math.abs(y2 - y1);
+        int sx = x1 < x2 ? 1 : -1, sy = y1 < y2 ? 1 : -1;
+        int err = dx - dy, x = x1, y = y1;
+        while (true) {
+            gui.fill(x, y, x + 1, y + 1, color);
+            if (x == x2 && y == y2) break;
+            int e2 = err * 2;
+            if (e2 > -dy) { err -= dy; x += sx; }
+            if (e2 < dx) { err += dx; y += sy; }
+        }
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/client/util/ANSITextProcessorClient.java
+package com.xiaoze_qwq_.mis.client.util;
+
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Style;
+import net.minecraft.network.chat.TextColor;
+
+import java.util.*;
+
+public class ANSITextProcessorClient {
+    private static final int CACHE_SIZE = 200;
+    private static final LinkedHashMap<String, Component> CACHE = new LinkedHashMap<String, Component>(CACHE_SIZE, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Component> eldest) {
+            return size() > CACHE_SIZE;
+        }
+    };
+
+    private static class StyleState {
+        TextColor foregroundColor;
+        boolean bold;
+        boolean italic;
+        boolean underlined;
+
+        StyleState() { reset(); }
+
+        void reset() {
+            foregroundColor = null;
+            bold = false;
+            italic = false;
+            underlined = false;
+        }
+
+        StyleState copy() {
+            StyleState copy = new StyleState();
+            copy.foregroundColor = this.foregroundColor;
+            copy.bold = this.bold;
+            copy.italic = this.italic;
+            copy.underlined = this.underlined;
+            return copy;
+        }
+
+        boolean equals(StyleState other) {
+            if (other == null) return false;
+            return Objects.equals(foregroundColor, other.foregroundColor) &&
+                    bold == other.bold &&
+                    italic == other.italic &&
+                    underlined == other.underlined;
+        }
+    }
+
+    private static final String[] ANSI_COLOR_HEX = {
+            "#000000", "#AA0000", "#00AA00", "#AA5500",
+            "#0000AA", "#AA00AA", "#00AAAA", "#AAAAAA",
+            "#555555", "#FF5555", "#55FF55", "#FFFF55",
+            "#5555FF", "#FF55FF", "#55FFFF", "#FFFFFF"
+    };
+
+    private static String ansiCodeToHex(int code) {
+        int index;
+        if (code >= 30 && code <= 37) index = code - 30;
+        else if (code >= 90 && code <= 97) index = code - 90 + 8;
+        else return null;
+        return ANSI_COLOR_HEX[index];
+    }
+
+    private static TextColor parseColor(String hex) {
+        return TextColor.parseColor(hex).result().orElse(null);
+    }
+
+    private static void applySgrParameters(StyleState current, List<Integer> params) {
+        int i = 0;
+        while (i < params.size()) {
+            int code = params.get(i);
+            if (code == 0) {
+                current.reset();
+            } else if (code == 1) {
+                current.bold = true;
+            } else if (code == 3) {
+                current.italic = true;
+            } else if (code == 4) {
+                current.underlined = true;
+            } else if (code == 22) {
+                current.bold = false;
+            } else if (code == 23) {
+                current.italic = false;
+            } else if (code == 24) {
+                current.underlined = false;
+            } else if (code == 39) {
+                current.foregroundColor = null;
+            } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+                String hex = ansiCodeToHex(code);
+                if (hex != null) {
+                    current.foregroundColor = parseColor(hex);
+                }
+            } else if (code == 38) {
+                if (i + 1 < params.size()) {
+                    int mode = params.get(i + 1);
+                    if (mode == 2 && i + 4 < params.size()) {
+                        int r = params.get(i + 2);
+                        int g = params.get(i + 3);
+                        int b = params.get(i + 4);
+                        String hex = String.format("#%02X%02X%02X", r, g, b);
+                        current.foregroundColor = parseColor(hex);
+                        i += 4;
+                    } else if (mode == 5 && i + 2 < params.size()) {
+                        int colorIndex = params.get(i + 2);
+                        if (colorIndex >= 0 && colorIndex < 256) {
+                            String hex;
+                            if (colorIndex < 16) {
+                                hex = ANSI_COLOR_HEX[colorIndex];
+                            } else if (colorIndex < 232) {
+                                int idx = colorIndex - 16;
+                                int r = (idx / 36) * 51;
+                                int g = ((idx / 6) % 6) * 51;
+                                int b = (idx % 6) * 51;
+                                hex = String.format("#%02X%02X%02X", r, g, b);
+                            } else {
+                                int gray = (colorIndex - 232) * 10 + 8;
+                                hex = String.format("#%02X%02X%02X", gray, gray, gray);
+                            }
+                            current.foregroundColor = parseColor(hex);
+                        }
+                        i += 2;
+                    }
+                }
+            } else if (code == 48) {
+                // å¿½ç•¥èƒŒæ™¯è‰²
+                if (i + 1 < params.size()) {
+                    int mode = params.get(i + 1);
+                    if (mode == 2) i += 4;
+                    else if (mode == 5) i += 2;
+                }
+            }
+            i++;
+        }
+    }
+
+    public static Component toTextComponent(String ansiText) {
+        if (ansiText == null) return Component.empty();
+        synchronized (CACHE) {
+            Component cached = CACHE.get(ansiText);
+            if (cached != null) return cached;
+        }
+        Component result = parseInternal(ansiText);
+        synchronized (CACHE) {
+            CACHE.put(ansiText, result);
+        }
+        return result;
+    }
+
+    private static Component parseInternal(String ansiText) {
+        List<MutableComponent> components = new ArrayList<>();
+        StyleState current = new StyleState();
+        StringBuilder textBuffer = new StringBuilder();
+        int index = 0, len = ansiText.length();
+
+        while (index < len) {
+            char ch = ansiText.charAt(index);
+            if (ch == '\u001B' && index + 1 < len && ansiText.charAt(index + 1) == '[') {
+                if (textBuffer.length() > 0) {
+                    components.add(createComponent(textBuffer.toString(), current));
+                    textBuffer.setLength(0);
+                }
+                int seqStart = index + 2, cmdEnd = seqStart;
+                while (cmdEnd < len && !Character.isLetter(ansiText.charAt(cmdEnd))) cmdEnd++;
+                if (cmdEnd < len) {
+                    String paramStr = ansiText.substring(seqStart, cmdEnd);
+                    char cmd = ansiText.charAt(cmdEnd);
+                    index = cmdEnd + 1;
+                    if (cmd == 'm') {
+                        List<Integer> params = new ArrayList<>();
+                        if (!paramStr.isEmpty()) {
+                            for (String part : paramStr.split(";")) {
+                                if (!part.isEmpty()) {
+                                    try {
+                                        params.add(Integer.parseInt(part));
+                                    } catch (NumberFormatException ignored) {}
+                                }
+                            }
+                        }
+                        applySgrParameters(current, params);
+                    }
+                } else {
+                    index++;
+                }
+            } else {
+                textBuffer.append(ch);
+                index++;
+            }
+        }
+        if (textBuffer.length() > 0) {
+            components.add(createComponent(textBuffer.toString(), current));
+        }
+
+        List<MutableComponent> merged = new ArrayList<>();
+        for (MutableComponent comp : components) {
+            if (!merged.isEmpty() && haveSameStyle(merged.get(merged.size() - 1), comp)) {
+                merged.get(merged.size() - 1).append(comp);
+            } else {
+                merged.add(comp);
+            }
+        }
+
+        MutableComponent result = Component.empty();
+        for (MutableComponent comp : merged) result.append(comp);
+        return result;
+    }
+
+    private static boolean haveSameStyle(MutableComponent a, MutableComponent b) {
+        Style sa = a.getStyle();
+        Style sb = b.getStyle();
+        return Objects.equals(sa.getColor(), sb.getColor()) &&
+                sa.isBold() == sb.isBold() &&
+                sa.isItalic() == sb.isItalic() &&
+                sa.isUnderlined() == sb.isUnderlined();
+    }
+
+    private static MutableComponent createComponent(String text, StyleState style) {
+        MutableComponent comp = Component.literal(text);
+        Style s = comp.getStyle();
+        if (style.foregroundColor != null) s = s.withColor(style.foregroundColor);
+        if (style.bold) s = s.withBold(true);
+        if (style.italic) s = s.withItalic(true);
+        if (style.underlined) s = s.withUnderlined(true);
+        comp.setStyle(s);
+        return comp;
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/command/MISCommand.java
+package com.xiaoze_qwq_.mis.command;
+
+import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import com.xiaoze_qwq_.mis.*;
+import com.xiaoze_qwq_.mis.config.MISConfig;
+import com.xiaoze_qwq_.mis.network.OpenStatusScreenPacket;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.Commands;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
+import net.neoforged.neoforge.network.PacketDistributor;
+
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+
+public class MISCommand {
+
+    public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
+        var base = Commands.literal("mis")
+                .requires(src -> src.hasPermission(0) && !isCommandBlock(src));
+
+        base.then(Commands.literal("verify")
+                .then(Commands.argument("password", StringArgumentType.word())
+                        .executes(MISCommand::executeVerify)));
+
+        base.then(Commands.literal("reload").executes(MISCommand::executeReload));
+
+        base.then(Commands.literal("set")
+                .then(Commands.literal("password")
+                        .then(Commands.argument("password", StringArgumentType.word())
+                                .executes(MISCommand::executeSetPassword))));
+
+        base.then(Commands.literal("unset")
+                .then(Commands.literal("password")
+                        .executes(MISCommand::executeUnsetPassword)));
+
+        base.then(Commands.literal("status").executes(MISCommand::executeStatusOverview));
+
+        var authNode = Commands.literal("auth")
+                .then(Commands.literal("list").executes(MISCommand::executeAuthList))
+                .then(Commands.literal("grant")
+                        .then(Commands.argument("player", StringArgumentType.word())
+                                .then(Commands.argument("duration", StringArgumentType.word())
+                                        .executes(MISCommand::executeAuthGrant))))
+                .then(Commands.literal("grantuuid")
+                        .then(Commands.argument("uuid", StringArgumentType.word())
+                                .then(Commands.argument("duration", StringArgumentType.word())
+                                        .executes(MISCommand::executeAuthGrantUuid))))
+                .then(Commands.literal("revoke")
+                        .then(Commands.argument("target", StringArgumentType.word())
+                                .executes(MISCommand::executeAuthRevoke)));
+        base.then(authNode);
+
+        var instanceNode = Commands.argument("instance", StringArgumentType.word())
+                .suggests((ctx, builder) -> {
+                    for (MCCInstance inst : MCCManager.getInstance().getAllInstances()) {
+                        builder.suggest(inst.getId());
+                        builder.suggest(inst.getConfig().name);
+                    }
+                    return builder.buildFuture();
+                })
+                .executes(ctx -> executeInstanceHelp(ctx, getInstanceId(ctx)))
+                .then(Commands.literal("input")
+                        .then(Commands.argument("command", StringArgumentType.greedyString())
+                                .executes(ctx -> executeInput(ctx, getInstanceId(ctx)))))
+                .then(Commands.literal("start").executes(ctx -> executeStart(ctx, getInstanceId(ctx))))
+                .then(Commands.literal("stop").executes(ctx -> executeStop(ctx, getInstanceId(ctx))))
+                .then(Commands.literal("restart").executes(ctx -> executeRestart(ctx, getInstanceId(ctx))))
+                .then(Commands.literal("forcestop").executes(ctx -> executeForceStop(ctx, getInstanceId(ctx))))
+                .then(Commands.literal("status").executes(ctx -> executeStatus(ctx, getInstanceId(ctx))))
+                .then(Commands.literal("immersive")
+                        .then(Commands.literal("on").executes(ctx -> executeImmersiveOn(ctx, getInstanceId(ctx))))
+                        .then(Commands.literal("off").executes(ctx -> executeImmersiveOff(ctx, getInstanceId(ctx)))))
+                .then(Commands.literal("set")
+                        .then(Commands.literal("history")
+                                .then(Commands.argument("lines", IntegerArgumentType.integer(1, 10000))
+                                        .executes(ctx -> {
+                                            int lines = IntegerArgumentType.getInteger(ctx, "lines");
+                                            String id = getInstanceId(ctx);
+                                            MISConfig.setInstanceField(id, "historyLimit", lines);
+                                            MCCInstance inst = MCCManager.getInstance().getInstance(id);
+                                            if (inst != null) {
+                                                inst.getConfig().historyLimit = lines;
+                                                inst.resizeBuffer(lines);
+                                            }
+                                            ctx.getSource().sendSuccess(() -> Component.literal("History limit set to " + lines), false);
+                                            return 1;
+                                        })))
+                        .then(Commands.literal("exitcode")
+                                .then(Commands.argument("code", IntegerArgumentType.integer(0, 255))
+                                        .executes(ctx -> {
+                                            int code = IntegerArgumentType.getInteger(ctx, "code");
+                                            String id = getInstanceId(ctx);
+                                            MISConfig.setInstanceField(id, "exitCode", code);
+                                            ctx.getSource().sendSuccess(() -> Component.literal("Exit code set to " + code + " (requires restart)"), false);
+                                            return 1;
+                                        })))
+                        .then(Commands.literal("autorestart")
+                                .then(Commands.literal("enable").executes(ctx -> {
+                                    String id = getInstanceId(ctx);
+                                    MISConfig.setInstanceField(id, "autoRestart", true);
+                                    ctx.getSource().sendSuccess(() -> Component.literal("Auto-restart enabled"), false);
+                                    return 1;
+                                }))
+                                .then(Commands.literal("disable").executes(ctx -> {
+                                    String id = getInstanceId(ctx);
+                                    MISConfig.setInstanceField(id, "autoRestart", false);
+                                    ctx.getSource().sendSuccess(() -> Component.literal("Auto-restart disabled"), false);
+                                    return 1;
+                                })))
+                        .then(Commands.literal("help").executes(ctx -> {
+                            ctx.getSource().sendSuccess(() -> Component.translatable("mis.set.help.title"), false);
+                            return 1;
+                        })));
+
+        base.then(instanceNode);
+        base.executes(MISCommand::executeHelp);
+        dispatcher.register(base);
+    }
+
+    private static boolean isCommandBlock(CommandSourceStack src) {
+        return src.source instanceof net.minecraft.world.level.BaseCommandBlock;
+    }
+
+    private static String getInstanceId(CommandContext<CommandSourceStack> ctx) {
+        String input = StringArgumentType.getString(ctx, "instance");
+        // å°è¯•è§£æä¸ºæ•°å­—ï¼Œå¦‚æœä¸æ˜¯åˆ™æŒ‰åç§°æŸ¥æ‰¾
+        try {
+            Integer.parseInt(input);
+            return input;
+        } catch (NumberFormatException e) {
+            MCCInstance inst = MCCManager.getInstance().getInstanceByName(input);
+            if (inst != null) {
+                return inst.getId();
+            }
+            return input; // è¿”å›åŸå§‹è¾“å…¥ï¼Œåç»­æ‰¾ä¸åˆ°å®ä¾‹æ—¶ä¼šæŠ¥é”™
+        }
+    }
+
+    private static boolean isConsole(CommandSourceStack src) { return src.getEntity() == null; }
+
+    private static boolean checkPermission(CommandSourceStack src, String perm) throws CommandSyntaxException {
+        if (isConsole(src)) return true;
+        ServerPlayer player = src.getPlayer();
+        if (player == null) return false;
+        return MISSessionManager.getInstance().isInMISMode(player);
+    }
+
+    private static int executeVerify(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (isConsole(src)) {
+            src.sendSuccess(() -> Component.translatable("mis.verify.console_info"), false);
+            return 1;
+        }
+        ServerPlayer player = src.getPlayer();
+        if (player == null) return 0;
+        UUID uuid = player.getUUID();
+        if (!MISConfig.hasPassword()) {
+            src.sendFailure(Component.translatable("mis.error.no_password"));
+            return 0;
+        }
+        long remaining = MISConfig.getVerifyLockRemaining(uuid);
+        if (remaining > 0) {
+            src.sendFailure(Component.translatable("mis.error.verify_locked", remaining / 1000));
+            return 0;
+        }
+        String pwd = StringArgumentType.getString(ctx, "password");
+        MISConfig.verifyPasswordAsync(pwd).thenAccept(ok -> {
+            MCCInServer.executeOnServerThread(() -> {
+                if (ok) {
+                    MISConfig.clearVerifyFailures(uuid);
+                    MISSessionManager.getInstance().grant(player, MISSessionManager.defaultDurationMs());
+                    src.sendSuccess(() -> Component.translatable("mis.verify.success"), false);
+                } else {
+                    MISConfig.recordVerifyFailure(uuid);
+                    long lockRemaining = MISConfig.getVerifyLockRemaining(uuid);
+                    if (lockRemaining > 0) {
+                        src.sendFailure(Component.translatable("mis.error.verify_locked", lockRemaining / 1000));
+                    } else {
+                        src.sendFailure(Component.translatable("mis.error.wrong_password"));
+                    }
+                }
+            });
+        });
+        return 1;
+    }
+
+    private static int executeSetPassword(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        if (!isConsole(src)) {
+            src.sendFailure(Component.translatable("mis.set.password.console_only"));
+            return 0;
+        }
+        String pwd = StringArgumentType.getString(ctx, "password");
+        if (pwd.isEmpty()) {
+            src.sendFailure(Component.translatable("mis.set.password.empty"));
+            return 0;
+        }
+        MISConfig.setPassword(pwd);
+        src.sendSuccess(() -> Component.translatable("mis.set.password.success"), false);
+        return 1;
+    }
+
+    private static int executeUnsetPassword(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        if (!isConsole(src)) {
+            src.sendFailure(Component.translatable("mis.set.password.console_only"));
+            return 0;
+        }
+        MISConfig.clearPassword();
+        src.sendSuccess(() -> Component.translatable("mis.unset.password.success"), false);
+        return 1;
+    }
+
+    private static int executeStatusOverview(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        if (isConsole(src)) {
+            StringBuilder sb = new StringBuilder("=== MIS Status ===\n");
+            sb.append("Password: ").append(MISConfig.hasPassword() ? "SET" : "NOT SET").append("\n");
+            sb.append("Verify: maxAttempts=").append(MISConfig.getVerifyMaxAttempts())
+                    .append(" lockout=").append(MISConfig.getVerifyLockoutSeconds()).append("s\n");
+            sb.append("Instances:\n");
+            for (MCCInstance inst : MCCManager.getInstance().getAllInstances()) {
+                sb.append("  [").append(inst.getId()).append("] ").append(inst.getConfig().name)
+                        .append(" running=").append(inst.isRunning())
+                        .append(" pid=").append(inst.getPid())
+                        .append(" status=").append(inst.getStatusMonitor() != null ? inst.getStatusMonitor().getFormattedStatus() : "n/a")
+                        .append("\n");
+            }
+            sb.append("Authorized players:\n");
+            for (var cookie : MISSessionManager.getInstance().listCookies()) {
+                sb.append("  ").append(cookie.username()).append(" (").append(cookie.uuid())
+                        .append(") expires=").append(cookie.expiresAt())
+                        .append(" remaining=").append(Math.max(0, cookie.remainingMs()) / 1000).append("s")
+                        .append(" ip=").append(cookie.ip())
+                        .append("\n");
+            }
+            String text = sb.toString();
+            for (String line : text.split("\n")) {
+                String l = line;
+                src.sendSuccess(() -> Component.literal(l), false);
+            }
+        } else {
+            ServerPlayer player = src.getPlayer();
+            if (player == null) return 0;
+            boolean authorized = MISSessionManager.getInstance().isInMISMode(player);
+            if (authorized) {
+                var cookie = MISSessionManager.getInstance().getCookie(player.getUUID());
+                long remaining = cookie != null ? Math.max(0, cookie.remainingMs()) / 1000 : 0;
+                src.sendSuccess(() -> Component.translatable("mis.status.player_authorized", remaining), false);
+            } else {
+                src.sendFailure(Component.translatable("mis.status.player_unauthorized"));
+            }
+        }
+        return 1;
+    }
+
+    private static int executeAuthList(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        if (!isConsole(src)) {
+            src.sendFailure(Component.translatable("mis.auth.console_only"));
+            return 0;
+        }
+        var cookies = MISSessionManager.getInstance().listCookies();
+        if (cookies.isEmpty()) {
+            src.sendSuccess(() -> Component.translatable("mis.auth.list.none"), false);
+            return 1;
+        }
+        for (var cookie : cookies) {
+            String line = "  " + cookie.username() + " (" + cookie.uuid() + ") expires="
+                    + cookie.expiresAt() + " remaining=" + Math.max(0, cookie.remainingMs()) / 1000
+                    + "s ip=" + cookie.ip();
+            src.sendSuccess(() -> Component.literal(line), false);
+        }
+        return 1;
+    }
+
+    private static int executeAuthGrant(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        if (!isConsole(src)) {
+            src.sendFailure(Component.translatable("mis.auth.console_only"));
+            return 0;
+        }
+        String name = StringArgumentType.getString(ctx, "player");
+        long durationMs = parseDuration(StringArgumentType.getString(ctx, "duration"));
+        ServerPlayer player = src.getServer().getPlayerList().getPlayerByName(name);
+        if (player == null) {
+            src.sendFailure(Component.translatable("mis.auth.player_not_found", name));
+            return 0;
+        }
+        MISSessionManager.getInstance().grant(player, durationMs);
+        src.sendSuccess(() -> Component.translatable("mis.auth.grant.success", name, durationMs / 1000), false);
+        return 1;
+    }
+
+    private static int executeAuthGrantUuid(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        if (!isConsole(src)) {
+            src.sendFailure(Component.translatable("mis.auth.console_only"));
+            return 0;
+        }
+        String uuidStr = StringArgumentType.getString(ctx, "uuid");
+        long durationMs = parseDuration(StringArgumentType.getString(ctx, "duration"));
+        UUID uuid;
+        try {
+            uuid = UUID.fromString(uuidStr);
+        } catch (IllegalArgumentException e) {
+            src.sendFailure(Component.translatable("mis.auth.invalid_uuid", uuidStr));
+            return 0;
+        }
+        MISSessionManager.getInstance().grant(uuid, "", "", durationMs, "");
+        src.sendSuccess(() -> Component.translatable("mis.auth.grantuuid.success", uuidStr, durationMs / 1000), false);
+        return 1;
+    }
+
+    private static int executeAuthRevoke(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        if (!isConsole(src)) {
+            src.sendFailure(Component.translatable("mis.auth.console_only"));
+            return 0;
+        }
+        String target = StringArgumentType.getString(ctx, "target");
+        UUID uuid;
+        try {
+            uuid = UUID.fromString(target);
+        } catch (IllegalArgumentException e) {
+            ServerPlayer player = src.getServer().getPlayerList().getPlayerByName(target);
+            if (player == null) {
+                src.sendFailure(Component.translatable("mis.auth.player_not_found", target));
+                return 0;
+            }
+            uuid = player.getUUID();
+        }
+        final UUID finalUuid = uuid;
+        if (!MISSessionManager.getInstance().hasCookie(finalUuid)) {
+            src.sendSuccess(() -> Component.translatable("mis.auth.revoke.not_found"), false);
+            return 1;
+        }
+        MISSessionManager.getInstance().revoke(finalUuid);
+        src.sendSuccess(() -> Component.translatable("mis.auth.revoke.success", finalUuid), false);
+        return 1;
+    }
+
+    private static long parseDuration(String input) {
+        if (input == null || input.isEmpty()) return MISSessionManager.defaultDurationMs();
+        String s = input.trim().toLowerCase(java.util.Locale.ROOT);
+        try {
+            if (s.endsWith("s")) return Long.parseLong(s.substring(0, s.length() - 1)) * 1000L;
+            if (s.endsWith("m")) return Long.parseLong(s.substring(0, s.length() - 1)) * 60_000L;
+            if (s.endsWith("h")) return Long.parseLong(s.substring(0, s.length() - 1)) * 3_600_000L;
+            if (s.endsWith("d")) return Long.parseLong(s.substring(0, s.length() - 1)) * 86_400_000L;
+            return Long.parseLong(s) * 1000L;
+        } catch (NumberFormatException e) {
+            return MISSessionManager.defaultDurationMs();
+        }
+    }
+
+    private static int executeReload(CommandContext<CommandSourceStack> ctx) {
+        MCCManager.getInstance().reloadInstances();
+        ctx.getSource().sendSuccess(() -> Component.translatable("mis.reload.success"), false);
+        return 1;
+    }
+
+    private static int executeInput(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        if (!checkPermission(ctx.getSource(), "mis.mismode")) return errorNoPermission(ctx);
+        MCCInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        if (!inst.isRunning()) {
+            ctx.getSource().sendFailure(Component.translatable("mis.error.mcc_not_running"));
+            return 0;
+        }
+        String cmd = StringArgumentType.getString(ctx, "command");
+        inst.sendCommand(cmd);
+        return 1;
+    }
+
+    private static int executeStart(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        if (!checkPermission(ctx.getSource(), "mis.start")) return errorNoPermission(ctx);
+        MCCInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        if (inst.isRunning()) {
+            ctx.getSource().sendFailure(Component.translatable("mis.error.already_running"));
+            return 0;
+        }
+        if (!inst.canStartNewOperation()) {
+            warnOtherOperation(ctx, inst);
+            return 0;
+        }
+        CompletableFuture.runAsync(inst::start);
+        ctx.getSource().sendSuccess(() -> Component.translatable("mis.start.success"), false);
+        return 1;
+    }
+
+    private static int executeStop(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        if (!checkPermission(ctx.getSource(), "mis.stop")) return errorNoPermission(ctx);
+        MCCInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        if (!inst.isRunning()) {
+            ctx.getSource().sendFailure(Component.translatable("mis.error.not_running"));
+            return 0;
+        }
+        if (!inst.canStartNewOperation()) {
+            warnOtherOperation(ctx, inst);
+            return 0;
+        }
+        CompletableFuture.runAsync(() -> inst.stop(true));
+        ctx.getSource().sendSuccess(() -> Component.translatable("mis.stop.success"), false);
+        return 1;
+    }
+
+    private static int executeRestart(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        if (!checkPermission(ctx.getSource(), "mis.restart")) return errorNoPermission(ctx);
+        MCCInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        if (!inst.canStartNewOperation()) {
+            warnOtherOperation(ctx, inst);
+            return 0;
+        }
+        inst.restart();
+        ctx.getSource().sendSuccess(() -> Component.translatable("mis.restart.success"), false);
+        return 1;
+    }
+
+    private static int executeForceStop(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        if (!checkPermission(ctx.getSource(), "mis.forcestop")) return errorNoPermission(ctx);
+        MCCInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        if (!inst.canStartNewOperation()) {
+            warnOtherOperation(ctx, inst);
+            return 0;
+        }
+        CompletableFuture.runAsync(() -> inst.forceStop());
+        ctx.getSource().sendSuccess(() -> Component.translatable("mis.forcestop.success"), false);
+        return 1;
+    }
+
+    private static int executeStatus(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        var player = src.getPlayer();
+        MCCInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        if (player == null) {
+            String status = inst.getStatusMonitor() != null ? inst.getStatusMonitor().getFormattedStatus() : "Monitor not available.";
+            src.sendSuccess(() -> Component.literal(status), false);
+        } else {
+            if (!checkPermission(src, "mis.status")) return errorNoPermission(ctx);
+            PacketDistributor.sendToPlayer(player, new OpenStatusScreenPacket(id));
+        }
+        return 1;
+    }
+
+    private static int executeImmersiveOn(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        var player = src.getPlayer();
+        MCCInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        if (player == null) {
+            if (inst.isImmersiveConsole()) {
+                src.sendFailure(Component.translatable("mis.immersive.already_on"));
+                return 0;
+            }
+            inst.setImmersiveConsole(true);
+            src.sendSuccess(() -> Component.translatable("mis.immersive.on"), false);
+        } else {
+            if (!checkPermission(src, "mis.immersive.read")) return errorNoPermission(ctx);
+            boolean canInput = checkPermission(src, "mis.immersive.input");
+            inst.addImmersiveSubscriber(player, canInput);
+            src.sendSuccess(() -> Component.translatable("mis.immersive.on_player"), false);
+        }
+        return 1;
+    }
+
+    private static int executeImmersiveOff(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        var player = src.getPlayer();
+        MCCInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        if (player == null) {
+            if (!inst.isImmersiveConsole()) {
+                src.sendFailure(Component.translatable("mis.immersive.already_off"));
+                return 0;
+            }
+            inst.setImmersiveConsole(false);
+            src.sendSuccess(() -> Component.translatable("mis.immersive.off"), false);
+        } else {
+            inst.removeImmersiveSubscriber(player);
+        }
+        return 1;
+    }
+
+    private static int executeInstanceHelp(CommandContext<CommandSourceStack> ctx, String id) {
+        ctx.getSource().sendSuccess(() -> Component.literal("Commands for instance " + id + ": input/start/stop/restart/forcestop/status/immersive/set"), false);
+        return 1;
+    }
+
+    private static int executeHelp(CommandContext<CommandSourceStack> ctx) {
+        ctx.getSource().sendSuccess(() -> Component.translatable("mis.help.title"), false);
+        return 1;
+    }
+
+    // è¾…åŠ©æ–¹æ³•ï¼šè§£æå®ä¾‹IDï¼Œå¦‚æœä¸æ˜¯æ•°å­—åˆ™æŒ‰åç§°æŸ¥æ‰¾ï¼Œæ‰¾ä¸åˆ°å‘é€é”™è¯¯
+    private static MCCInstance resolveInstance(CommandContext<CommandSourceStack> ctx, String id) {
+        MCCInstance inst;
+        try {
+            Integer.parseInt(id);
+            inst = MCCManager.getInstance().getInstance(id);
+        } catch (NumberFormatException e) {
+            inst = MCCManager.getInstance().getInstanceByName(id);
+        }
+        if (inst == null) {
+            ctx.getSource().sendFailure(Component.translatable("mis.error.instance_not_found", id));
+        }
+        return inst;
+    }
+
+    // å½“æœ‰å…¶ä»–æ“ä½œè¿›è¡Œæ—¶ï¼Œå‘é€è­¦å‘Š
+    private static void warnOtherOperation(CommandContext<CommandSourceStack> ctx, MCCInstance inst) {
+        ctx.getSource().sendFailure(Component.translatable("mis.error.other_operation", inst.getId()));
+    }
+
+    private static int errorNoPermission(CommandContext<CommandSourceStack> ctx) {
+        ctx.getSource().sendFailure(Component.translatable("mis.error.not_in_mis_mode"));
+        return 0;
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/config/MISConfig.java
+package com.xiaoze_qwq_.mis.config;
+
+import com.moandjiezana.toml.Toml;
+import com.xiaoze_qwq_.mis.MCCInServer;
+import net.neoforged.fml.loading.FMLPaths;
+
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class MISConfig {
+    private static final Path CONFIG_PATH = FMLPaths.CONFIGDIR.get().resolve("mis_config.toml");
+    private static final Path PASSWORD_FILE = FMLPaths.CONFIGDIR.get().resolve("mispassword");
+
+    private static final String PBKDF2_ALGO = "PBKDF2WithHmacSHA512";
+    private static final int PBKDF2_ITERATIONS = 120_000;
+    private static final int SALT_BYTES = 16;
+    private static final SecureRandom RNG = new SecureRandom();
+
+    private static final ExecutorService HASH_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "MIS-Hash");
+        t.setDaemon(true);
+        return t;
+    });
+
+    private static InstanceConfig defaultConfig;
+    private static Map<String, InstanceConfig> instances = new ConcurrentHashMap<>();
+
+    private static volatile String passwordHash = "";
+
+    private static int verifyMaxAttempts = 5;
+    private static int verifyLockoutSeconds = 60;
+    private static final Map<UUID, long[]> verifyFailures = new ConcurrentHashMap<>();
+
+    static {
+        load();
+    }
+
+    // ==================== å¯†ç ç®¡ç†ï¼ˆPBKDF2 + éšæœºç›ï¼‰ ====================
+    private static byte[] pbkdf2(char[] password, byte[] salt, int iterations) {
+        try {
+            PBEKeySpec spec = new PBEKeySpec(password, salt, iterations, 512);
+            SecretKeyFactory factory = SecretKeyFactory.getInstance(PBKDF2_ALGO);
+            return factory.generateSecret(spec).getEncoded();
+        } catch (Exception e) {
+            throw new IllegalStateException("PBKDF2 not available", e);
+        }
+    }
+
+    private static String hashPassword(String plain) {
+        byte[] salt = new byte[SALT_BYTES];
+        RNG.nextBytes(salt);
+        byte[] hash = pbkdf2(plain.toCharArray(), salt, PBKDF2_ITERATIONS);
+        return PBKDF2_ITERATIONS + "$" + Base64.getEncoder().encodeToString(salt)
+                + "$" + Base64.getEncoder().encodeToString(hash);
+    }
+
+    private static boolean verifyStoredPassword(String plain, String stored) {
+        if (stored == null || stored.isEmpty()) return false;
+        try {
+            String[] parts = stored.split("\\$");
+            if (parts.length != 3) return false;
+            int iterations = Integer.parseInt(parts[0]);
+            byte[] salt = Base64.getDecoder().decode(parts[1]);
+            byte[] expected = Base64.getDecoder().decode(parts[2]);
+            byte[] actual = pbkdf2(plain.toCharArray(), salt, iterations);
+            return MessageDigest.isEqual(expected, actual);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static void loadPasswordHash() {
+        if (Files.exists(PASSWORD_FILE)) {
+            try {
+                passwordHash = new String(Files.readAllBytes(PASSWORD_FILE), StandardCharsets.UTF_8).trim();
+            } catch (IOException e) {
+                MCCInServer.LOGGER.error("Failed to read mispassword, password will be empty", e);
+                passwordHash = "";
+            }
+        } else {
+            passwordHash = "";
+        }
+    }
+
+    public static boolean hasPassword() {
+        return passwordHash != null && !passwordHash.isEmpty();
+    }
+
+    public static boolean verifyPassword(String plain) {
+        if (!hasPassword() || plain == null) return false;
+        return verifyStoredPassword(plain, passwordHash);
+    }
+
+    public static CompletableFuture<Boolean> verifyPasswordAsync(String plain) {
+        return CompletableFuture.supplyAsync(() -> verifyPassword(plain), HASH_EXECUTOR);
+    }
+
+    public static void setPassword(String pw) {
+        if (pw == null) return;
+        String stored = hashPassword(pw);
+        try {
+            Files.write(PASSWORD_FILE, stored.getBytes(StandardCharsets.UTF_8));
+            passwordHash = stored;
+            MCCInServer.LOGGER.info("Password stored as PBKDF2 hash in mispassword.");
+        } catch (IOException e) {
+            MCCInServer.LOGGER.error("Failed to write password hash to mispassword", e);
+        }
+    }
+
+    public static void clearPassword() {
+        try {
+            Files.deleteIfExists(PASSWORD_FILE);
+        } catch (IOException e) {
+            MCCInServer.LOGGER.error("Failed to remove mispassword", e);
+        }
+        passwordHash = "";
+        verifyFailures.clear();
+        MCCInServer.LOGGER.info("Password removed.");
+    }
+
+    // ==================== éªŒè¯å¤±è´¥é™åˆ¶ ====================
+    public static int getVerifyMaxAttempts() { return verifyMaxAttempts; }
+    public static int getVerifyLockoutSeconds() { return verifyLockoutSeconds; }
+
+    public static long getVerifyLockRemaining(UUID uuid) {
+        long[] rec = verifyFailures.get(uuid);
+        if (rec == null) return 0;
+        return Math.max(0, rec[1] - System.currentTimeMillis());
+    }
+
+    public static void recordVerifyFailure(UUID uuid) {
+        long[] rec = verifyFailures.computeIfAbsent(uuid, k -> new long[2]);
+        rec[0]++;
+        if (rec[0] >= verifyMaxAttempts) {
+            rec[1] = System.currentTimeMillis() + verifyLockoutSeconds * 1000L;
+            rec[0] = 0;
+        }
+    }
+
+    public static void clearVerifyFailures(UUID uuid) {
+        verifyFailures.remove(uuid);
+    }
+
+    // ==================== é…ç½®æ•°æ®ç±» ====================
+    public static class InstanceConfig {
+        public String id;
+        public String name = "";
+        public boolean autoStart = false;
+        public int startupDelaySeconds = 0;
+        public String workingDirectory = "";
+        public String executablePath = "MCC/MinecraftClient";
+        public List<String> arguments = new ArrayList<>();
+        public Map<String, String> environment = new HashMap<>();
+
+        public boolean autoRestart = true;
+        public int exitCode = 0;
+        public int statusRefreshSeconds = 2;
+        public boolean enableProcessMonitor = true;
+        public boolean enableNetworkMonitor = true;
+        public int historyLimit = 2000;
+        public String logDirectory = "MCC-Output";
+        public String compressionFormat = "tar.gz";
+        public String compressionStrategy = "OLD";
+        public int scheduledCompressionMinutes = 60;
+        public int maxArchives = 10;
+        public boolean saveLogTime = true;
+        public String timeFormat = "HH:mm:ss";
+        public boolean outputAlone = false;
+        public boolean outputWithTime = true;
+        public String outputTimeFormat = "HH:mm:ss";
+
+        public void mergeMissing(InstanceConfig defaults) {
+            if (name.isEmpty() && defaults != null) name = defaults.name;
+            if (executablePath == null || executablePath.isEmpty()) executablePath = defaults.executablePath;
+            if (arguments.isEmpty()) arguments = defaults.arguments;
+            if (environment.isEmpty()) environment = defaults.environment;
+            if (workingDirectory.isEmpty()) workingDirectory = defaults.workingDirectory;
+            if (logDirectory.isEmpty()) logDirectory = defaults.logDirectory;
+            if (statusRefreshSeconds <= 0) statusRefreshSeconds = defaults.statusRefreshSeconds;
+            if (historyLimit <= 0) historyLimit = defaults.historyLimit;
+            if (exitCode < 0) exitCode = defaults.exitCode;
+            if (maxArchives <= 0) maxArchives = defaults.maxArchives;
+        }
+    }
+
+    // ==================== åŠ è½½ä¸ä¿å­˜ ====================
+    public static void load() {
+        if (!Files.exists(CONFIG_PATH)) {
+            defaultConfig = new InstanceConfig();
+            instances.clear();
+            InstanceConfig defInst = new InstanceConfig();
+            defInst.id = "1";
+            defInst.name = "MCC-1";
+            instances.put("1", defInst);
+            saveToml();
+            loadPasswordHash();
+            return;
+        }
+
+        try (Reader reader = new InputStreamReader(Files.newInputStream(CONFIG_PATH), StandardCharsets.UTF_8)) {
+            Toml toml = new Toml().read(reader);
+
+            Toml verifyTable = toml.getTable("verify");
+            if (verifyTable != null) {
+                Long maxAttempts = verifyTable.getLong("maxAttempts");
+                if (maxAttempts != null && maxAttempts > 0) verifyMaxAttempts = maxAttempts.intValue();
+                Long lockoutSeconds = verifyTable.getLong("lockoutSeconds");
+                if (lockoutSeconds != null && lockoutSeconds > 0) verifyLockoutSeconds = lockoutSeconds.intValue();
+            }
+
+            defaultConfig = parseInstanceConfig(toml.getTable("default"), "default");
+
+            instances.clear();
+            List<Toml> instanceTables = toml.getTables("instances");
+            if (instanceTables != null) {
+                for (Toml instToml : instanceTables) {
+                    String id = instToml.getString("id", "");
+                    if (id.isEmpty()) continue;
+                    InstanceConfig cfg = parseInstanceConfig(instToml, id);
+                    cfg.id = id;
+                    mergeWithDefault(cfg);
+                    instances.put(id, cfg);
+                }
+            }
+            if (instances.isEmpty()) {
+                InstanceConfig defInst = new InstanceConfig();
+                defInst.id = "1";
+                defInst.name = "MCC-1";
+                mergeWithDefault(defInst);
+                instances.put("1", defInst);
+            }
+
+            // ==================== å®ä¾‹æ ¡éªŒ ====================
+            Iterator<Map.Entry<String, InstanceConfig>> it = instances.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<String, InstanceConfig> entry = it.next();
+                String id = entry.getKey();
+                InstanceConfig cfg = entry.getValue();
+
+                // ID å¿…é¡»ä¸ºçº¯æ•°å­—
+                if (!id.matches("\\d+")) {
+                    MCCInServer.LOGGER.error("Instance ID '{}' is not a pure number. Skipping instance.", id);
+                    it.remove();
+                    continue;
+                }
+
+                // åç§°ä¸èƒ½æ˜¯çº¯æ•°å­—
+                if (cfg.name != null && cfg.name.matches("\\d+")) {
+                    MCCInServer.LOGGER.error("Instance '{}' has a numeric name '{}'. Please use a non-numeric name.", id, cfg.name);
+                    it.remove();
+                    continue;
+                }
+
+                // æ£€æŸ¥åç§°æ˜¯å¦é‡å¤ï¼ˆä¸åŒºåˆ†å¤§å°å†™ï¼‰
+                String lowerName = (cfg.name != null ? cfg.name : "").toLowerCase(Locale.ROOT);
+                for (Map.Entry<String, InstanceConfig> other : instances.entrySet()) {
+                    if (other.getKey().equals(id)) continue;
+                    String otherLower = (other.getValue().name != null ? other.getValue().name : "").toLowerCase(Locale.ROOT);
+                    if (lowerName.equals(otherLower)) {
+                        MCCInServer.LOGGER.error("Duplicate instance name '{}' (case-insensitive) between instances '{}' and '{}'. Skipping instance '{}'.",
+                                cfg.name, id, other.getKey(), id);
+                        it.remove();
+                        break;
+                    }
+                }
+            }
+
+            saveToml();
+            loadPasswordHash();
+        } catch (Exception e) {
+            MCCInServer.LOGGER.error("Failed to load mis_config.toml, using defaults", e);
+            defaultConfig = new InstanceConfig();
+            instances.clear();
+            InstanceConfig defInst = new InstanceConfig();
+            defInst.id = "1";
+            defInst.name = "MCC-1";
+            instances.put("1", defInst);
+        }
+    }
+
+    private static InstanceConfig parseInstanceConfig(Toml table, String fallbackId) {
+        InstanceConfig cfg = new InstanceConfig();
+        if (table == null) return cfg;
+        cfg.id = table.getString("id", fallbackId);
+        cfg.name = table.getString("name", "");
+        cfg.autoStart = table.getBoolean("autoStart", false);
+        cfg.startupDelaySeconds = table.getLong("startupDelaySeconds", 0L).intValue();
+        cfg.workingDirectory = table.getString("workingDirectory", "");
+        cfg.executablePath = table.getString("executablePath", "MCC/MinecraftClient");
+        cfg.arguments = table.getList("arguments", new ArrayList<>());
+        cfg.environment = table.getTable("environment") != null ? toStringMap(table.getTable("environment")) : new HashMap<>();
+        cfg.autoRestart = table.getBoolean("autoRestart", true);
+        cfg.exitCode = table.getLong("exitCode", 0L).intValue();
+        cfg.statusRefreshSeconds = table.getLong("statusRefreshSeconds", 2L).intValue();
+        cfg.enableProcessMonitor = table.getBoolean("enableProcessMonitor", true);
+        cfg.enableNetworkMonitor = table.getBoolean("enableNetworkMonitor", true);
+        cfg.historyLimit = table.getLong("historyLimit", 2000L).intValue();
+        cfg.logDirectory = table.getString("logDirectory", "");
+        cfg.compressionFormat = table.getString("compressionFormat", "tar.gz");
+        cfg.compressionStrategy = table.getString("compressionStrategy", "OLD");
+        cfg.scheduledCompressionMinutes = table.getLong("scheduledCompressionMinutes", 60L).intValue();
+        cfg.maxArchives = table.getLong("maxArchives", 10L).intValue();
+        cfg.saveLogTime = table.getBoolean("saveLogTime", true);
+        cfg.timeFormat = table.getString("timeFormat", "HH:mm:ss");
+        cfg.outputAlone = table.getBoolean("outputAlone", false);
+        cfg.outputWithTime = table.getBoolean("outputWithTime", true);
+        cfg.outputTimeFormat = table.getString("outputTimeFormat", "HH:mm:ss");
+        return cfg;
+    }
+
+    private static void mergeWithDefault(InstanceConfig cfg) {
+        if (cfg.name == null || cfg.name.isEmpty()) cfg.name = defaultConfig.name.isEmpty() ? cfg.id : defaultConfig.name;
+        if (cfg.executablePath == null || cfg.executablePath.isEmpty()) cfg.executablePath = defaultConfig.executablePath;
+        if (cfg.arguments.isEmpty() && !defaultConfig.arguments.isEmpty()) cfg.arguments = defaultConfig.arguments;
+        if (cfg.environment.isEmpty() && !defaultConfig.environment.isEmpty()) cfg.environment = defaultConfig.environment;
+        if (cfg.workingDirectory.isEmpty()) cfg.workingDirectory = defaultConfig.workingDirectory;
+        if (cfg.logDirectory.isEmpty()) cfg.logDirectory = defaultConfig.logDirectory.isEmpty() ? "MCC-Output" : defaultConfig.logDirectory;
+        if (cfg.statusRefreshSeconds <= 0) cfg.statusRefreshSeconds = defaultConfig.statusRefreshSeconds;
+        if (cfg.historyLimit <= 0) cfg.historyLimit = defaultConfig.historyLimit;
+        if (cfg.exitCode < 0) cfg.exitCode = defaultConfig.exitCode;
+        if (cfg.maxArchives <= 0) cfg.maxArchives = defaultConfig.maxArchives;
+    }
+
+    private static Map<String, String> toStringMap(Toml table) {
+        Map<String, String> map = new HashMap<>();
+        table.toMap().forEach((k, v) -> map.put(k, v.toString()));
+        return map;
+    }
+
+    private static void saveToml() {
+        try (Writer writer = new OutputStreamWriter(Files.newOutputStream(CONFIG_PATH), StandardCharsets.UTF_8)) {
+            writer.write("# MIS Configuration (TOML)\n\n");
+            writer.write("[verify]\n");
+            writer.write("maxAttempts = " + verifyMaxAttempts + "\n");
+            writer.write("lockoutSeconds = " + verifyLockoutSeconds + "\n\n");
+            writer.write("[default]\n");
+            writeInstanceConfig(writer, defaultConfig, true);
+            writer.write("\n");
+            for (InstanceConfig cfg : instances.values()) {
+                writer.write("[[instances]]\n");
+                writer.write("id = \"" + cfg.id + "\"\n");
+                writeInstanceConfig(writer, cfg, false);
+                writer.write("\n");
+            }
+        } catch (IOException e) {
+            MCCInServer.LOGGER.error("Failed to save mis_config.toml", e);
+        }
+    }
+
+    private static void writeInstanceConfig(Writer writer, InstanceConfig cfg, boolean skipId) throws IOException {
+        writer.write("name = \"" + cfg.name + "\"\n");
+        writer.write("autoStart = " + cfg.autoStart + "\n");
+        writer.write("startupDelaySeconds = " + cfg.startupDelaySeconds + "\n");
+        writer.write("workingDirectory = \"" + cfg.workingDirectory + "\"\n");
+        writer.write("executablePath = \"" + cfg.executablePath + "\"\n");
+        writer.write("arguments = " + cfg.arguments.toString() + "\n");
+        writer.write("environment = " + cfg.environment.toString() + "\n");
+        writer.write("autoRestart = " + cfg.autoRestart + "\n");
+        writer.write("exitCode = " + cfg.exitCode + "\n");
+        writer.write("statusRefreshSeconds = " + cfg.statusRefreshSeconds + "\n");
+        writer.write("enableProcessMonitor = " + cfg.enableProcessMonitor + "\n");
+        writer.write("enableNetworkMonitor = " + cfg.enableNetworkMonitor + "\n");
+        writer.write("historyLimit = " + cfg.historyLimit + "\n");
+        writer.write("logDirectory = \"" + cfg.logDirectory + "\"\n");
+        writer.write("compressionFormat = \"" + cfg.compressionFormat + "\"\n");
+        writer.write("compressionStrategy = \"" + cfg.compressionStrategy + "\"\n");
+        writer.write("scheduledCompressionMinutes = " + cfg.scheduledCompressionMinutes + "\n");
+        writer.write("maxArchives = " + cfg.maxArchives + "\n");
+        writer.write("saveLogTime = " + cfg.saveLogTime + "\n");
+        writer.write("timeFormat = \"" + cfg.timeFormat + "\"\n");
+        writer.write("outputAlone = " + cfg.outputAlone + "\n");
+        writer.write("outputWithTime = " + cfg.outputWithTime + "\n");
+        writer.write("outputTimeFormat = \"" + cfg.outputTimeFormat + "\"\n");
+    }
+
+    // ==================== å…¬å…±è®¿é—®å™¨ ====================
+    public static Collection<InstanceConfig> getAllInstances() { return instances.values(); }
+    public static InstanceConfig getInstanceConfig(String id) { return instances.get(id); }
+    public static String[] getInstanceIds() { return instances.keySet().toArray(new String[0]); }
+    public static boolean instanceExists(String id) { return instances.containsKey(id); }
+
+    public static void setInstanceField(String id, String field, Object value) {
+        InstanceConfig cfg = instances.get(id);
+        if (cfg == null) return;
+        switch (field) {
+            case "autoRestart": cfg.autoRestart = (boolean) value; break;
+            case "exitCode": cfg.exitCode = (int) value; break;
+            case "statusRefreshSeconds": cfg.statusRefreshSeconds = (int) value; break;
+            case "enableProcessMonitor": cfg.enableProcessMonitor = (boolean) value; break;
+            case "enableNetworkMonitor": cfg.enableNetworkMonitor = (boolean) value; break;
+            case "historyLimit": cfg.historyLimit = (int) value; break;
+            case "logDirectory": cfg.logDirectory = (String) value; break;
+            case "saveLogTime": cfg.saveLogTime = (boolean) value; break;
+            case "timeFormat": cfg.timeFormat = (String) value; break;
+            case "executablePath": cfg.executablePath = (String) value; break;
+            case "outputAlone": cfg.outputAlone = (boolean) value; break;
+            case "outputWithTime": cfg.outputWithTime = (boolean) value; break;
+            case "outputTimeFormat": cfg.outputTimeFormat = (String) value; break;
+        }
+        saveToml();
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/logging/MCCOutputLogger.java
+package com.xiaoze_qwq_.mis.logging;
+
+import com.xiaoze_qwq_.mis.config.MISConfig;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+
+public class MCCOutputLogger {
+    private static final Logger LOGGER = LoggerFactory.getLogger("MCCInServer");
+    private final Path logDir;
+    private final MISConfig.InstanceConfig config;  // ä¿å­˜å®ä¾‹é…ç½®å¼•ç”¨
+    private static final long MAX_LOG_SIZE_BYTES = 1 * 1024 * 1024;
+    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd-HH-mm-ss");
+
+    private PrintWriter currentWriter;
+    private Path currentLogPath;
+    private Instant currentStartTime;
+
+    public MCCOutputLogger(Path logDirectory, MISConfig.InstanceConfig config) {
+        this.logDir = logDirectory;
+        this.config = config;
+        initLogDir();
+    }
+
+    private void initLogDir() {
+        try {
+            if (!Files.exists(logDir)) Files.createDirectories(logDir);
+        } catch (IOException e) {
+            LOGGER.error("Failed to create log directory: " + logDir, e);
+        }
+    }
+
+    public synchronized void startNewLog() {
+        if (currentWriter != null) currentWriter.close();
+        currentStartTime = Instant.now();
+        String fileName = "MCC-Output-" + DATE_FORMATTER.format(
+                LocalDateTime.ofInstant(currentStartTime, ZoneId.systemDefault())) + ".log";
+        currentLogPath = logDir.resolve(fileName);
+        try {
+            currentWriter = new PrintWriter(Files.newBufferedWriter(currentLogPath, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND));
+            LOGGER.info("[{}] Started new MCC log: {}", config.id, currentLogPath);
+        } catch (IOException e) {
+            LOGGER.error("[{}] Failed to create log file", config.id, e);
+            currentWriter = null;
+        }
+    }
+
+    public synchronized void writeLine(String line) {
+        if (currentWriter == null) return;
+        String outputLine = line;
+        if (config.saveLogTime) {
+            String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern(config.timeFormat));
+            outputLine = "[" + timestamp + "] " + line;
+        }
+        currentWriter.println(outputLine);
+        currentWriter.flush();
+        checkSizeAndRotate();
+    }
+
+    private void checkSizeAndRotate() {
+        if (currentLogPath != null && Files.exists(currentLogPath)) {
+            try {
+                if (Files.size(currentLogPath) >= MAX_LOG_SIZE_BYTES) {
+                    LOGGER.info("[{}] Log file exceeded 1MB, rotating...", config.id);
+                    rotate();
+                }
+            } catch (IOException e) {
+                LOGGER.error("[{}] Failed to check log size", config.id, e);
+            }
+        }
+    }
+
+    public synchronized void rotate() {
+        if (currentWriter == null) return;
+        currentWriter.close();
+        currentWriter = null;
+        if (currentLogPath != null && Files.exists(currentLogPath)) {
+            compressToTarGz(currentLogPath);
+        }
+        startNewLog();
+    }
+
+    private void compressToTarGz(Path logFile) {
+        try {
+            String baseName = logFile.getFileName().toString();
+            String tarGzName = baseName.replace(".log", ".tar.gz");
+            Path tarGzPath = logFile.resolveSibling(tarGzName);
+            try (OutputStream fileOut = Files.newOutputStream(tarGzPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                 BufferedOutputStream bufferedOut = new BufferedOutputStream(fileOut);
+                 GzipCompressorOutputStream gzipOut = new GzipCompressorOutputStream(bufferedOut);
+                 TarArchiveOutputStream tarOut = new TarArchiveOutputStream(gzipOut)) {
+
+                tarOut.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX);
+                TarArchiveEntry entry = new TarArchiveEntry(logFile.toFile(), baseName);
+                entry.setSize(Files.size(logFile));
+                tarOut.putArchiveEntry(entry);
+                Files.copy(logFile, tarOut);
+                tarOut.closeArchiveEntry();
+                tarOut.finish();
+                LOGGER.info("[{}] Compressed log to {}", config.id, tarGzPath);
+                Files.delete(logFile);
+            }
+        } catch (IOException e) {
+            LOGGER.error("[{}] Failed to compress log file: " + logFile, config.id, e);
+        }
+    }
+
+    public synchronized void closeAndFinalize() {
+        if (currentWriter != null) {
+            currentWriter.close();
+            currentWriter = null;
+        }
+        if (currentLogPath != null && Files.exists(currentLogPath)) {
+            compressToTarGz(currentLogPath);
+        }
+        LOGGER.info("[{}] MCC output logger closed and last log compressed", config.id);
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/monitor/StatusMonitor.java
+package com.xiaoze_qwq_.mis.monitor;
+
+import com.xiaoze_qwq_.mis.MCCInstance;
+import com.xiaoze_qwq_.mis.MCCInServer;
+import oshi.SystemInfo;
+import oshi.hardware.NetworkIF;
+import oshi.software.os.OSProcess;
+import oshi.software.os.OperatingSystem;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+
+public class StatusMonitor {
+    private final MCCInstance instance;
+    private SystemInfo systemInfo;
+    private OperatingSystem os;
+    private ScheduledFuture<?> monitorTask;
+    private boolean initialized = false;
+
+    private volatile double cpuUsage = -1;
+    private volatile long memoryMB = -1;
+    private volatile int mccPid = -1;
+
+    private volatile long lastTotalRx = 0;
+    private volatile long lastTotalTx = 0;
+    private volatile long lastTime = 0;
+    private volatile double downloadSpeedKBps = 0.0;
+    private volatile double uploadSpeedKBps = 0.0;
+    private volatile long totalRxMB = 0;
+    private volatile long totalTxMB = 0;
+    private volatile Instant mccStartTime = null;
+
+    public StatusMonitor(MCCInstance instance) {
+        this.instance = instance;
+        try {
+            systemInfo = new SystemInfo();
+            os = systemInfo.getOperatingSystem();
+            initialized = true;
+        } catch (Throwable t) {
+            MCCInServer.LOGGER.warn("Failed to init OSHI for instance " + instance.getId(), t);
+        }
+    }
+
+    public void start() {
+        if (!initialized) return;
+        updateNetworkStats();
+        lastTime = System.currentTimeMillis();
+        monitorTask = instance.getScheduler().scheduleAtFixedRate(() -> {
+            if (instance.getConfig().enableProcessMonitor) updateProcessStats();
+            if (instance.getConfig().enableNetworkMonitor) updateNetworkStats();
+            // æ¯æ¬¡æ›´æ–°åå‘æ‰€æœ‰çŠ¶æ€è®¢é˜…è€…æ¨é€æœ€æ–°æ•°æ®
+            instance.broadcastStatus();
+        }, 0, instance.getConfig().statusRefreshSeconds, TimeUnit.SECONDS);
+    }
+
+    public void stop() {
+        if (monitorTask != null) monitorTask.cancel(false);
+    }
+
+    private void updateProcessStats() {
+        long pid = instance.getPid();
+        if (pid <= 0) {
+            cpuUsage = -1; memoryMB = -1; mccPid = -1;
+            return;
+        }
+        OSProcess process = os.getProcess((int) pid);
+        if (process != null) {
+            cpuUsage = process.getProcessCpuLoadCumulative() * 100;
+            memoryMB = process.getResidentSetSize() / (1024 * 1024);
+            mccPid = (int) pid;
+            if (mccStartTime == null) mccStartTime = Instant.now();
+        } else {
+            cpuUsage = -1; memoryMB = -1; mccPid = -1;
+        }
+    }
+
+    private synchronized void updateNetworkStats() {
+        try {
+            List<NetworkIF> netIfs = systemInfo.getHardware().getNetworkIFs();
+            long nowRx = 0, nowTx = 0;
+            for (NetworkIF net : netIfs) {
+                if (!net.getName().startsWith("lo") && net.getBytesRecv() > 0) {
+                    nowRx += net.getBytesRecv();
+                    nowTx += net.getBytesSent();
+                }
+            }
+            long now = System.currentTimeMillis();
+            long elapsedMs = now - lastTime;
+            if (lastTotalRx > 0 && elapsedMs > 0) {
+                downloadSpeedKBps = (nowRx - lastTotalRx) / 1024.0 / (elapsedMs / 1000.0);
+                uploadSpeedKBps = (nowTx - lastTotalTx) / 1024.0 / (elapsedMs / 1000.0);
+            }
+            lastTotalRx = nowRx; lastTotalTx = nowTx; lastTime = now;
+            totalRxMB = lastTotalRx / (1024 * 1024);
+            totalTxMB = lastTotalTx / (1024 * 1024);
+        } catch (Exception e) {
+            MCCInServer.LOGGER.warn("Network stats update failed for " + instance.getId(), e);
+        }
+    }
+
+    public double getCpuUsage() { return cpuUsage; }
+    public long getMemoryMB() { return memoryMB; }
+    public int getMccPid() { return mccPid; }
+    public double getDownloadSpeedKBps() { return downloadSpeedKBps; }
+    public double getUploadSpeedKBps() { return uploadSpeedKBps; }
+    public long getTotalRxMB() { return totalRxMB; }
+    public long getTotalTxMB() { return totalTxMB; }
+
+    public String getUptimeFormatted() {
+        if (mccStartTime == null || !instance.isRunning()) return "N/A";
+        Duration d = Duration.between(mccStartTime, Instant.now());
+        long h = d.toHours(), m = d.toMinutesPart(), s = d.toSecondsPart();
+        return h > 0 ? String.format("%dh %dm %ds", h, m, s) : (m > 0 ? String.format("%dm %ds", m, s) : String.format("%ds", s));
+    }
+
+    public String getFormattedStatus() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== Instance ").append(instance.getId()).append(" Status ===\n");
+        sb.append("Running: ").append(instance.isRunning()).append("\n");
+        if (instance.isRunning()) {
+            sb.append("Uptime: ").append(getUptimeFormatted()).append("\n");
+            if (instance.getConfig().enableProcessMonitor) {
+                sb.append("PID: ").append(mccPid).append("\n");
+                sb.append("CPU: ").append(cpuUsage >= 0 ? String.format("%.1f%%", cpuUsage) : "N/A").append("\n");
+                sb.append("Memory: ").append(memoryMB >= 0 ? memoryMB + " MB" : "N/A").append("\n");
+            }
+            if (instance.getConfig().enableNetworkMonitor) {
+                sb.append("Net: â†“ ").append(String.format("%.1f", downloadSpeedKBps)).append(" KB/s â†‘ ").append(String.format("%.1f", uploadSpeedKBps)).append(" KB/s\n");
+                sb.append("Total: â†“ ").append(totalRxMB).append(" MB â†‘ ").append(totalTxMB).append(" MB\n");
+            }
+        }
+        return sb.toString();
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/network/ClientPacketHandlers.java
+package com.xiaoze_qwq_.mis.network;
+
+import com.xiaoze_qwq_.mis.client.gui.MCCImmersiveScreen;
+import com.xiaoze_qwq_.mis.client.gui.StatusScreen;
+import com.xiaoze_qwq_.mis.client.util.ANSITextProcessorClient;
+import net.minecraft.client.Minecraft;
+import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+public class ClientPacketHandlers {
+
+    public static void handleMCCOutput(MCCOutputPacket msg, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            Minecraft.getInstance().execute(() -> {
+                MCCImmersiveScreen.addLine(msg.instanceId(), ANSITextProcessorClient.toTextComponent(msg.rawANSI()));
+            });
+        });
+    }
+
+    public static void handleImmersiveStatus(ImmersiveStatusPacket msg, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            Minecraft mc = Minecraft.getInstance();
+            mc.execute(() -> {
+                if (msg.enabled()) {
+                    if (mc.screen instanceof MCCImmersiveScreen screen) {
+                        screen.switchToInstance(msg.instanceId(), msg.canInput());
+                    } else {
+                        mc.setScreen(new MCCImmersiveScreen(msg.instanceId(), msg.canInput()));
+                    }
+                } else {
+                    if (mc.screen instanceof MCCImmersiveScreen screen && screen.getCurrentInstanceId().equals(msg.instanceId())) {
+                        mc.screen.onClose();
+                    }
+                }
+            });
+        });
+    }
+
+    public static void handleOpenStatusScreen(OpenStatusScreenPacket msg, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            Minecraft.getInstance().execute(() -> {
+                Minecraft.getInstance().setScreen(new StatusScreen(msg.instanceId()));
+            });
+        });
+    }
+
+    public static void handleStatusData(StatusDataPacket msg, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            Minecraft.getInstance().execute(() -> {
+                if (Minecraft.getInstance().screen instanceof StatusScreen screen && screen.getInstanceId().equals(msg.instanceId())) {
+                    screen.updateStatus(msg);
+                }
+            });
+        });
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/network/ImmersiveExitPacket.java
+package com.xiaoze_qwq_.mis.network;
+
+import com.xiaoze_qwq_.mis.MCCInServer;
+import com.xiaoze_qwq_.mis.MCCInstance;
+import com.xiaoze_qwq_.mis.MCCManager;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.ByteBufCodecs;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerPlayer;
+import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+public record ImmersiveExitPacket(String instanceId) implements CustomPacketPayload {
+    public static final CustomPacketPayload.Type<ImmersiveExitPacket> TYPE =
+            new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(MCCInServer.MOD_ID, "immersive_exit"));
+
+    public static final StreamCodec<RegistryFriendlyByteBuf, ImmersiveExitPacket> STREAM_CODEC =
+            StreamCodec.composite(
+                    ByteBufCodecs.STRING_UTF8, ImmersiveExitPacket::instanceId,
+                    ImmersiveExitPacket::new
+            );
+
+    @Override
+    public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
+    public static void handle(ImmersiveExitPacket msg, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            if (ctx.player() instanceof ServerPlayer player) {
+                MCCInstance inst = MCCManager.getInstance().getInstance(msg.instanceId);
+                if (inst != null) {
+                    inst.removeImmersiveSubscriber(player);
+                }
+            }
+        });
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/network/ImmersiveInputPacket.java
+package com.xiaoze_qwq_.mis.network;
+
+import com.xiaoze_qwq_.mis.MCCInstance;
+import com.xiaoze_qwq_.mis.MCCManager;
+import com.xiaoze_qwq_.mis.MISSessionManager;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.ByteBufCodecs;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerPlayer;
+import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+import static com.xiaoze_qwq_.mis.MCCInServer.MOD_ID;
+
+public record ImmersiveInputPacket(String instanceId, String command) implements CustomPacketPayload {
+    public static final CustomPacketPayload.Type<ImmersiveInputPacket> TYPE =
+            new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(MOD_ID, "immersive_input"));
+
+    public static final StreamCodec<RegistryFriendlyByteBuf, ImmersiveInputPacket> STREAM_CODEC =
+            StreamCodec.composite(
+                    ByteBufCodecs.STRING_UTF8, ImmersiveInputPacket::instanceId,
+                    ByteBufCodecs.STRING_UTF8, ImmersiveInputPacket::command,
+                    ImmersiveInputPacket::new
+            );
+
+    @Override
+    public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
+    public static void handle(ImmersiveInputPacket msg, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            if (ctx.player() instanceof ServerPlayer player) {
+                MCCInstance inst = MCCManager.getInstance().getInstance(msg.instanceId);
+                if (inst != null && inst.isSubscribed(player)) {
+                    // ä»…ä½¿ç”¨å¯†ç æ¨¡å¼æ£€æŸ¥è¾“å…¥æƒé™
+                    if (MISSessionManager.getInstance().isInMISMode(player)) {
+                        inst.sendCommand(msg.command);
+                    }
+                }
+            }
+        });
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/network/ImmersiveStatusPacket.java
+package com.xiaoze_qwq_.mis.network;
+
+import com.xiaoze_qwq_.mis.MCCInServer;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.ByteBufCodecs;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+
+public record ImmersiveStatusPacket(String instanceId, boolean enabled, boolean canInput) implements CustomPacketPayload {
+    public static final CustomPacketPayload.Type<ImmersiveStatusPacket> TYPE =
+            new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(MCCInServer.MOD_ID, "immersive_status"));
+
+    public static final StreamCodec<RegistryFriendlyByteBuf, ImmersiveStatusPacket> STREAM_CODEC =
+            StreamCodec.composite(
+                    ByteBufCodecs.STRING_UTF8, ImmersiveStatusPacket::instanceId,
+                    ByteBufCodecs.BOOL, ImmersiveStatusPacket::enabled,
+                    ByteBufCodecs.BOOL, ImmersiveStatusPacket::canInput,
+                    ImmersiveStatusPacket::new
+            );
+
+    @Override
+    public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/network/InstanceRemovedPacket.java
+package com.xiaoze_qwq_.mis.network;
+
+import com.xiaoze_qwq_.mis.MCCInServer;
+import com.xiaoze_qwq_.mis.client.gui.MCCImmersiveScreen;
+import net.minecraft.client.Minecraft;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.ByteBufCodecs;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+public record InstanceRemovedPacket(String instanceId) implements CustomPacketPayload {
+    public static final CustomPacketPayload.Type<InstanceRemovedPacket> TYPE =
+            new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(MCCInServer.MOD_ID, "instance_removed"));
+
+    public static final StreamCodec<RegistryFriendlyByteBuf, InstanceRemovedPacket> STREAM_CODEC =
+            StreamCodec.composite(
+                    ByteBufCodecs.STRING_UTF8, InstanceRemovedPacket::instanceId,
+                    InstanceRemovedPacket::new
+            );
+
+    @Override
+    public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
+    public static void handleClient(InstanceRemovedPacket msg, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            Minecraft.getInstance().execute(() -> {
+                MCCImmersiveScreen.clearInstanceLines(msg.instanceId);
+            });
+        });
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/network/MCCOutputPacket.java
+package com.xiaoze_qwq_.mis.network;
+
+import com.xiaoze_qwq_.mis.MCCInServer;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.ByteBufCodecs;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+
+public record MCCOutputPacket(String instanceId, String rawANSI) implements CustomPacketPayload {
+    public static final CustomPacketPayload.Type<MCCOutputPacket> TYPE =
+            new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(MCCInServer.MOD_ID, "mcc_output"));
+
+    public static final StreamCodec<RegistryFriendlyByteBuf, MCCOutputPacket> STREAM_CODEC =
+            StreamCodec.composite(
+                    ByteBufCodecs.STRING_UTF8, MCCOutputPacket::instanceId,
+                    ByteBufCodecs.STRING_UTF8, MCCOutputPacket::rawANSI,
+                    MCCOutputPacket::new
+            );
+
+    @Override
+    public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/network/MISNetwork.java
+package com.xiaoze_qwq_.mis.network;
+
+import com.xiaoze_qwq_.mis.MCCInServer;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.fml.loading.FMLEnvironment;
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+
+public class MISNetwork {
+    private static final String PROTOCOL_VERSION = "1";
+
+    public static void register(RegisterPayloadHandlersEvent event) {
+        PayloadRegistrar registrar = event.registrar(MCCInServer.MOD_ID)
+                .versioned(PROTOCOL_VERSION)
+                .optional();
+
+        // C2S åŒ…ï¼šæœåŠ¡ç«¯å’Œå®¢æˆ·ç«¯éƒ½ä¼šæ³¨å†Œï¼Œä½†ä¸ä¼šåŠ è½½å®¢æˆ·ç«¯ç±»
+        registrar.playToServer(
+                StatusRequestPacket.TYPE,
+                StatusRequestPacket.STREAM_CODEC,
+                StatusRequestPacket::handle
+        );
+        registrar.playToServer(
+                ImmersiveInputPacket.TYPE,
+                ImmersiveInputPacket.STREAM_CODEC,
+                ImmersiveInputPacket::handle
+        );
+        registrar.playToServer(
+                ImmersiveExitPacket.TYPE,
+                ImmersiveExitPacket.STREAM_CODEC,
+                ImmersiveExitPacket::handle
+        );
+
+        // S2C åŒ…ï¼šä»…å®¢æˆ·ç«¯ç¯å¢ƒæ³¨å†Œï¼Œé¿å…æœåŠ¡ç«¯åŠ è½½ Screen/Minecraft ç­‰å®¢æˆ·ç«¯ç±»
+        if (FMLEnvironment.dist == Dist.CLIENT) {
+            registerClientPackets(registrar);
+        }
+    }
+
+    private static void registerClientPackets(PayloadRegistrar registrar) {
+        registrar.playToClient(
+                MCCOutputPacket.TYPE,
+                MCCOutputPacket.STREAM_CODEC,
+                ClientPacketHandlers::handleMCCOutput
+        );
+        registrar.playToClient(
+                ImmersiveStatusPacket.TYPE,
+                ImmersiveStatusPacket.STREAM_CODEC,
+                ClientPacketHandlers::handleImmersiveStatus
+        );
+        registrar.playToClient(
+                OpenStatusScreenPacket.TYPE,
+                OpenStatusScreenPacket.STREAM_CODEC,
+                ClientPacketHandlers::handleOpenStatusScreen
+        );
+        registrar.playToClient(
+                StatusDataPacket.TYPE,
+                StatusDataPacket.STREAM_CODEC,
+                ClientPacketHandlers::handleStatusData
+        );
+        registrar.playToClient(
+                InstanceRemovedPacket.TYPE,
+                InstanceRemovedPacket.STREAM_CODEC,
+                InstanceRemovedPacket::handleClient
+        );
+    }
+
+    // ä¿ç•™å…¼å®¹ï¼Œå®é™…å·²æ— è°ƒç”¨
+    public static void commonSetup(RegisterPayloadHandlersEvent event) {
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/network/OpenStatusScreenPacket.java
+package com.xiaoze_qwq_.mis.network;
+
+import com.xiaoze_qwq_.mis.MCCInServer;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.ByteBufCodecs;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+
+public record OpenStatusScreenPacket(String instanceId) implements CustomPacketPayload {
+    public static final CustomPacketPayload.Type<OpenStatusScreenPacket> TYPE =
+            new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(MCCInServer.MOD_ID, "open_status_screen"));
+
+    public static final StreamCodec<RegistryFriendlyByteBuf, OpenStatusScreenPacket> STREAM_CODEC =
+            StreamCodec.composite(
+                    ByteBufCodecs.STRING_UTF8, OpenStatusScreenPacket::instanceId,
+                    OpenStatusScreenPacket::new
+            );
+
+    @Override
+    public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/network/StatusDataPacket.java
+package com.xiaoze_qwq_.mis.network;
+
+import com.xiaoze_qwq_.mis.MCCInServer;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+
+public record StatusDataPacket(String instanceId, boolean mccRunning, String mccUptime,
+                               double cpuUsage, long memoryMB,
+                               double downloadSpeedKBps, double uploadSpeedKBps,
+                               long totalRxMB, long totalTxMB) implements CustomPacketPayload {
+
+    public static final CustomPacketPayload.Type<StatusDataPacket> TYPE =
+            new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(MCCInServer.MOD_ID, "status_data"));
+
+    public static final StreamCodec<RegistryFriendlyByteBuf, StatusDataPacket> STREAM_CODEC =
+            StreamCodec.of(
+                    (buf, packet) -> {
+                        buf.writeUtf(packet.instanceId);
+                        buf.writeBoolean(packet.mccRunning);
+                        buf.writeUtf(packet.mccUptime);
+                        buf.writeDouble(packet.cpuUsage);
+                        buf.writeLong(packet.memoryMB);
+                        buf.writeDouble(packet.downloadSpeedKBps);
+                        buf.writeDouble(packet.uploadSpeedKBps);
+                        buf.writeLong(packet.totalRxMB);
+                        buf.writeLong(packet.totalTxMB);
+                    },
+                    buf -> new StatusDataPacket(
+                            buf.readUtf(),
+                            buf.readBoolean(),
+                            buf.readUtf(),
+                            buf.readDouble(),
+                            buf.readLong(),
+                            buf.readDouble(),
+                            buf.readDouble(),
+                            buf.readLong(),
+                            buf.readLong()
+                    )
+            );
+
+    @Override
+    public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/network/StatusRequestPacket.java
+package com.xiaoze_qwq_.mis.network;
+
+import com.xiaoze_qwq_.mis.MCCInServer;
+import com.xiaoze_qwq_.mis.MCCManager;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.ByteBufCodecs;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+public record StatusRequestPacket(String instanceId) implements CustomPacketPayload {
+    public static final CustomPacketPayload.Type<StatusRequestPacket> TYPE =
+            new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(MCCInServer.MOD_ID, "status_request"));
+
+    public static final StreamCodec<RegistryFriendlyByteBuf, StatusRequestPacket> STREAM_CODEC =
+            StreamCodec.composite(
+                    ByteBufCodecs.STRING_UTF8, StatusRequestPacket::instanceId,
+                    StatusRequestPacket::new
+            );
+
+    @Override
+    public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
+    public static void handle(StatusRequestPacket msg, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            var player = ctx.player();
+            if (player instanceof net.minecraft.server.level.ServerPlayer serverPlayer) {
+                var inst = MCCManager.getInstance().getInstance(msg.instanceId);
+                if (inst != null) {
+                    inst.addStatusSubscriber(serverPlayer);
+                }
+            }
+        });
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/util/ANSITextProcessor.java
+package com.xiaoze_qwq_.mis.util;
+
+import java.util.regex.Pattern;
+
+public class ANSITextProcessor {
+    private static final Pattern ANSI_PATTERN = Pattern.compile("\\x1B\\[[;\\d]*[ -/]*[@-~]");
+
+    public static String toPlainText(String ansiString) {
+        if (ansiString == null) return "";
+        return ANSI_PATTERN.matcher(ansiString).replaceAll("");
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/util/LogEntry.java
+package com.xiaoze_qwq_.mis.util;
+
+public class LogEntry {
+    public final String message;
+    public final long timestamp;
+
+    public LogEntry(String message, long timestamp) {
+        this.message = message;
+        this.timestamp = timestamp;
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/util/RingBuffer.java
+package com.xiaoze_qwq_.mis.util;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+public class RingBuffer<T> {
+    private Object[] buffer;  // å»æ‰ final
+    private volatile int writePos = 0;
+    private volatile int size = 0;
+    private int capacity;
+    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+
+    public RingBuffer(int capacity) {
+        this.capacity = capacity;
+        this.buffer = new Object[capacity];
+    }
+
+    public void add(T item) {
+        lock.writeLock().lock();
+        try {
+            buffer[writePos] = item;
+            writePos = (writePos + 1) % capacity;
+            if (size < capacity) size++;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    public List<T> getLast(int count) {
+        lock.readLock().lock();
+        try {
+            if (count <= 0 || size == 0) return new ArrayList<>();
+            int actual = Math.min(count, size);
+            List<T> result = new ArrayList<>(actual);
+            int start = (writePos - size + capacity) % capacity;
+            for (int i = 0; i < size; i++) {
+                int idx = (start + i) % capacity;
+                if (i >= size - actual) {
+                    @SuppressWarnings("unchecked")
+                    T item = (T) buffer[idx];
+                    result.add(item);
+                }
+            }
+            return result;
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    public int size() {
+        return size;
+    }
+
+    public int getCapacity() {
+        return capacity;
+    }
+
+    public void resize(int newCapacity) {
+        lock.writeLock().lock();
+        try {
+            if (newCapacity == capacity) return;
+            Object[] newBuffer = new Object[newCapacity];
+            int oldSize = size;
+            int start = (writePos - oldSize + capacity) % capacity;
+            for (int i = 0; i < oldSize; i++) {
+                newBuffer[i] = buffer[(start + i) % capacity];
+            }
+            this.buffer = newBuffer;  // ç°åœ¨å¯ä»¥èµ‹å€¼
+            this.capacity = newCapacity;
+            this.size = Math.min(oldSize, newCapacity);
+            this.writePos = this.size % capacity;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    public void clear() {
+        lock.writeLock().lock();
+        try {
+            for (int i = 0; i < capacity; i++) buffer[i] = null;
+            writePos = 0;
+            size = 0;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/MCCInServer.java
+package com.xiaoze_qwq_.mis;
+
+import com.xiaoze_qwq_.mis.command.MISCommand;
+import com.xiaoze_qwq_.mis.config.MISConfig;
+import com.xiaoze_qwq_.mis.network.*;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
+import net.neoforged.bus.api.IEventBus;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.Mod;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.server.ServerStartedEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.network.PacketDistributor;
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+@Mod(MCCInServer.MOD_ID)
+public class MCCInServer {
+    public static final String MOD_ID = "mccinserver";
+    public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
+    private static volatile MinecraftServer serverInstance;
+
+    public MCCInServer(IEventBus modEventBus) {
+        modEventBus.addListener(this::registerPayloads);
+        modEventBus.addListener(MISNetwork::commonSetup);
+        NeoForge.EVENT_BUS.register(this);
+    }
+
+    private void registerPayloads(RegisterPayloadHandlersEvent event) {
+        MISNetwork.register(event);
+    }
+
+    @SubscribeEvent
+    public void onRegisterCommands(RegisterCommandsEvent event) {
+        MISCommand.register(event.getDispatcher());
+    }
+
+    @SubscribeEvent
+    public void onServerStarted(ServerStartedEvent event) {
+        serverInstance = event.getServer();
+        LOGGER.info("MCC In Server started. LuckPerms not used, password-only mode.");
+        MISSessionManager.getInstance().load();
+        MISSessionManager.getInstance().purgeExpired();
+        if (!MISConfig.hasPassword()) {
+            LOGGER.warn("MIS password is not set. Use /mis set password <password> from the server console to enable verification.");
+        } else {
+            LOGGER.info("MIS password is set. Players can verify with /mis verify <password>.");
+        }
+        if (isLogCommandsEnabled()) {
+            LOGGER.warn("server.properties log-commands is enabled. The /mis verify password will be written to the server log. Consider setting log-commands=false to avoid leaking passwords.");
+        }
+        MCCManager.getInstance().start();
+    }
+
+    @SubscribeEvent
+    public void onServerStopping(ServerStoppingEvent event) {
+        MCCManager.getInstance().stop();
+    }
+
+    @SubscribeEvent
+    public void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            if (MISSessionManager.getInstance().isInMISMode(player)) {
+                LOGGER.info("Player {} reconnected with a valid MIS auth cookie.", player.getGameProfile().getName());
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
+        if (event.getEntity() instanceof net.minecraft.server.level.ServerPlayer player) {
+            MCCManager.getInstance().removeDisconnectedPlayer(player.getUUID());
+        }
+    }
+
+    private static boolean isLogCommandsEnabled() {
+        try {
+            Path props = Paths.get("server.properties");
+            if (Files.exists(props)) {
+                for (String line : Files.readAllLines(props, StandardCharsets.UTF_8)) {
+                    if (line.startsWith("log-commands=")) {
+                        return line.substring("log-commands=".length()).trim().equalsIgnoreCase("true");
+                    }
+                }
+            }
+        } catch (IOException e) {
+            // ignore
+        }
+        return false;
+    }
+
+    public static MinecraftServer getServer() {
+        return serverInstance;
+    }
+
+    /**
+     * åœ¨æœåŠ¡ç«¯ä¸»çº¿ç¨‹ä¸Šæ‰§è¡Œä»»åŠ¡ã€‚ç½‘ç»œåŒ…å¿…é¡»ä»ä¸»çº¿ç¨‹å‘é€ï¼Œå¦åˆ™ä¼šä¸ä¸»çº¿ç¨‹å¹¶å‘
+     * å†™å…¥ Connection çš„å…±äº«å‘é€ç¼“å†²ï¼Œå¯¼è‡´å¼‚å¸¸å¹¶ä½¿åå°è¿›ç¨‹æµç¨‹ä¸­æ–­ã€‚
+     */
+    public static void executeOnServerThread(Runnable action) {
+        MinecraftServer server = serverInstance;
+        if (server == null) return;
+        if (server.isSameThread()) {
+            runSafely(action);
+        } else {
+            server.execute(() -> runSafely(action));
+        }
+    }
+
+    public static void sendToPlayer(ServerPlayer player, CustomPacketPayload payload) {
+        if (player == null || player.connection == null) return;
+        executeOnServerThread(() -> PacketDistributor.sendToPlayer(player, payload));
+    }
+
+    public static void sendToAllPlayers(CustomPacketPayload payload) {
+        executeOnServerThread(() -> PacketDistributor.sendToAllPlayers(payload));
+    }
+
+    private static void runSafely(Runnable action) {
+        try {
+            action.run();
+        } catch (Exception e) {
+            LOGGER.warn("Error executing server-thread network task", e);
+        }
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/MCCInstance.java
+package com.xiaoze_qwq_.mis;
+
+import com.xiaoze_qwq_.mis.config.MISConfig;
+import com.xiaoze_qwq_.mis.logging.MCCOutputLogger;
+import com.xiaoze_qwq_.mis.monitor.StatusMonitor;
+import com.xiaoze_qwq_.mis.network.*;
+import com.xiaoze_qwq_.mis.util.ANSITextProcessor;
+import com.xiaoze_qwq_.mis.util.LogEntry;
+import com.xiaoze_qwq_.mis.util.RingBuffer;
+import net.minecraft.server.level.ServerPlayer;
+import net.neoforged.neoforge.network.PacketDistributor;
+import org.slf4j.Logger;
+
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Paths;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+public class MCCInstance {
+    public enum OperationState {
+        IDLE,
+        STARTING,
+        STOPPING,
+        RESTARTING,
+        FORCE_STOPPING;
+
+        public String getTranslationKey() {
+            return "mis.status." + name().toLowerCase();
+        }
+    }
+
+    private final String instanceId;
+    private MISConfig.InstanceConfig config;
+    private final Logger LOGGER = MCCInServer.LOGGER;
+    private final RingBuffer<LogEntry> outputRing;
+    private final Set<ServerPlayer> immersiveSubscribers = ConcurrentHashMap.newKeySet();
+    private final Set<ServerPlayer> statusSubscribers = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean running = new AtomicBoolean(false);
+    private final AtomicBoolean restartScheduled = new AtomicBoolean(false);
+    private final AtomicLong currentPid = new AtomicLong(-1);
+    private final ReentrantReadWriteLock processLock = new ReentrantReadWriteLock();
+
+    private Process mccProcess;
+    private BufferedWriter processWriter;
+    private InputStream processInputStream;
+    private ExecutorService outputReaderExecutor;
+    private ScheduledExecutorService scheduler;
+    private Thread waitForExitThread;
+    private MCCOutputLogger outputLogger;
+    private StatusMonitor statusMonitor;
+
+    private final AtomicBoolean immersiveConsole = new AtomicBoolean(false);
+    private final AtomicInteger consoleLastPrintedIndex = new AtomicInteger(0);
+
+    private final org.apache.logging.log4j.Logger ALONE_LOGGER;
+
+    // å½“å‰æ“ä½œçŠ¶æ€
+    private volatile OperationState operationState = OperationState.IDLE;
+
+    public MCCInstance(String id, MISConfig.InstanceConfig config) {
+        this.instanceId = id;
+        this.config = config;
+        this.outputRing = new RingBuffer<>(config.historyLimit);
+        this.outputLogger = new MCCOutputLogger(Paths.get(config.logDirectory), config);
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "MIS-" + id + "-Scheduler");
+            t.setDaemon(true);
+            return t;
+        });
+        this.ALONE_LOGGER = createAloneLogger();
+    }
+
+    private org.apache.logging.log4j.Logger createAloneLogger() {
+        org.apache.logging.log4j.core.LoggerContext ctx =
+                (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false);
+        org.apache.logging.log4j.core.config.Configuration cfg = ctx.getConfiguration();
+        org.apache.logging.log4j.core.layout.PatternLayout layout =
+                org.apache.logging.log4j.core.layout.PatternLayout.newBuilder().withPattern("%m%n").build();
+        org.apache.logging.log4j.core.appender.ConsoleAppender appender =
+                org.apache.logging.log4j.core.appender.ConsoleAppender.newBuilder()
+                        .setName("MISAloneConsole-" + instanceId)
+                        .setLayout(layout)
+                        .setTarget(org.apache.logging.log4j.core.appender.ConsoleAppender.Target.SYSTEM_OUT)
+                        .build();
+        appender.start();
+        org.apache.logging.log4j.core.config.LoggerConfig loggerConfig =
+                new org.apache.logging.log4j.core.config.LoggerConfig("MISAloneLogger-" + instanceId,
+                        org.apache.logging.log4j.Level.INFO, false);
+        loggerConfig.addAppender(appender, org.apache.logging.log4j.Level.INFO, null);
+        cfg.addLogger("MISAloneLogger-" + instanceId, loggerConfig);
+        ctx.updateLoggers();
+        return org.apache.logging.log4j.LogManager.getLogger("MISAloneLogger-" + instanceId);
+    }
+
+    // ==================== æ“ä½œçŠ¶æ€æ§åˆ¶ ====================
+    public synchronized boolean startOperation(OperationState newState) {
+        if (operationState != OperationState.IDLE) {
+            return false;
+        }
+        operationState = newState;
+        return true;
+    }
+
+    public void endOperation() {
+        operationState = OperationState.IDLE;
+    }
+
+    public OperationState getOperationState() {
+        return operationState;
+    }
+
+    public boolean canStartNewOperation() {
+        return operationState == OperationState.IDLE;
+    }
+
+    // ==================== è¿›ç¨‹å¯åŠ¨/åœæ­¢ ====================
+    public boolean start() {
+        if (!startOperation(OperationState.STARTING)) return false;
+        try {
+            startInternal();
+        } finally {
+            endOperation();
+        }
+        return true;
+    }
+
+    private void startInternal() {
+        processLock.writeLock().lock();
+        try {
+            if (running.get()) {
+                LOGGER.warn("[{}] MCC already running", instanceId);
+                return;
+            }
+            killPreviousProcess();
+            outputRing.clear();
+            consoleLastPrintedIndex.set(0);
+            if (outputLogger != null) outputLogger.closeAndFinalize();
+            outputLogger = new MCCOutputLogger(Paths.get(config.logDirectory), config);
+            outputLogger.startNewLog();
+
+            String path = config.executablePath;
+            String osName = System.getProperty("os.name").toLowerCase();
+            if (osName.contains("win") && !path.endsWith(".exe")) path += ".exe";
+
+            File workDir = null;
+            if (!config.workingDirectory.isEmpty()) {
+                workDir = new File(config.workingDirectory);
+            }
+
+            File execFile;
+            if (workDir != null) {
+                execFile = new File(workDir, path);
+            } else {
+                execFile = new File(path);
+            }
+
+            if (!execFile.exists()) {
+                LOGGER.error("[{}] Executable not found: {}", instanceId, execFile.getAbsolutePath());
+                return;
+            }
+            if (!execFile.canExecute() && !osName.contains("win")) {
+                try {
+                    Runtime.getRuntime().exec("chmod +x " + execFile.getAbsolutePath());
+                } catch (IOException e) {
+                    LOGGER.error("[{}] chmod failed", instanceId, e);
+                }
+            }
+
+            ProcessBuilder pb = new ProcessBuilder(execFile.getAbsolutePath());
+            pb.directory(workDir != null ? workDir : execFile.getParentFile());
+            pb.redirectErrorStream(true);
+            config.environment.forEach(pb.environment()::put);
+
+            mccProcess = pb.start();
+            currentPid.set(mccProcess.pid());
+            processWriter = new BufferedWriter(new OutputStreamWriter(mccProcess.getOutputStream(), StandardCharsets.UTF_8));
+            processInputStream = mccProcess.getInputStream();
+            running.set(true);
+
+            outputReaderExecutor = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "MIS-" + instanceId + "-OutputReader");
+                t.setDaemon(true);
+                return t;
+            });
+            outputReaderExecutor.submit(this::readOutputLoop);
+
+            waitForExitThread = new Thread(() -> {
+                try {
+                    int exitCode = mccProcess.waitFor();
+                    LOGGER.info("[{}] MCC exited with code {}", instanceId, exitCode);
+                    running.set(false);
+                    handleProcessExit(exitCode);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }, "MIS-" + instanceId + "-WaitForExit");
+            waitForExitThread.setDaemon(true);
+            waitForExitThread.start();
+
+            statusMonitor = new StatusMonitor(this);
+            if (config.enableProcessMonitor || config.enableNetworkMonitor) {
+                statusMonitor.start();
+            }
+
+            LOGGER.info("[{}] MCC process started: {}", instanceId, execFile.getAbsolutePath());
+        } catch (IOException e) {
+            LOGGER.error("[{}] Failed to start MCC", instanceId, e);
+            running.set(false);
+            if (outputReaderExecutor != null) {
+                outputReaderExecutor.shutdownNow();
+                outputReaderExecutor = null;
+            }
+            if (processInputStream != null) {
+                try { processInputStream.close(); } catch (IOException ignored) {}
+                processInputStream = null;
+            }
+            if (processWriter != null) {
+                try { processWriter.close(); } catch (IOException ignored) {}
+                processWriter = null;
+            }
+        } finally {
+            processLock.writeLock().unlock();
+        }
+    }
+
+    private void readOutputLoop() {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(processInputStream, StandardCharsets.UTF_8))) {
+            String line;
+            while (running.get() && (line = reader.readLine()) != null) {
+                long now = System.currentTimeMillis();
+                String raw = line;
+                String plain = ANSITextProcessor.toPlainText(raw);
+                outputRing.add(new LogEntry(raw, now));
+                if (outputLogger != null) outputLogger.writeLine(plain);
+                if (immersiveConsole.get()) {
+                    printToConsole(raw, now);
+                }
+                broadcastToSubscribers(raw);
+            }
+        } catch (IOException e) {
+            if (running.get()) LOGGER.error("[{}] Output reader error", instanceId, e);
+        }
+    }
+
+    private void killPreviousProcess() {
+        long pid = currentPid.get();
+        if (pid > 0) {
+            ProcessHandle.of(pid).ifPresent(ph -> {
+                if (ph.isAlive()) {
+                    ph.destroy();
+                    try { ph.onExit().get(5, TimeUnit.SECONDS); } catch (Exception e) { ph.destroyForcibly(); }
+                }
+            });
+        }
+    }
+
+    private void handleProcessExit(int exitCode) {
+        if (exitCode == config.exitCode) {
+            LOGGER.info("[{}] Expected exit code, not restarting.", instanceId);
+            closeLogger();
+            sendInstanceRemovedPacket();
+            return;
+        }
+        if (config.autoRestart) {
+            LOGGER.info("[{}] Auto-restarting in 3s...", instanceId);
+            scheduleRestart();
+        } else {
+            closeLogger();
+            sendInstanceRemovedPacket();
+        }
+    }
+
+    private void sendInstanceRemovedPacket() {
+        MCCInServer.sendToAllPlayers(new InstanceRemovedPacket(instanceId));
+    }
+
+    private void closeLogger() {
+        if (outputLogger != null) {
+            try {
+                outputLogger.closeAndFinalize();
+            } catch (Exception e) {
+                LOGGER.error("[{}] Error closing logger", instanceId, e);
+            }
+            outputLogger = null;
+        }
+    }
+
+    private void scheduleRestart() {
+        if (restartScheduled.compareAndSet(false, true)) {
+            scheduler.schedule(() -> {
+                restartScheduled.set(false);
+                if (!running.get()) start();
+            }, 3, TimeUnit.SECONDS);
+        }
+    }
+
+    public void stop(boolean sendExit) {
+        if (!startOperation(sendExit ? OperationState.STOPPING : OperationState.FORCE_STOPPING)) return;
+        try {
+            stopInternal(sendExit);
+        } finally {
+            endOperation();
+        }
+    }
+
+    private void stopInternal(boolean sendExit) {
+        processLock.writeLock().lock();
+        try {
+            if (!running.get() && mccProcess == null) return;
+            running.set(false);
+
+            if (processInputStream != null) {
+                try { processInputStream.close(); } catch (IOException ignored) {}
+                processInputStream = null;
+            }
+            if (outputReaderExecutor != null) {
+                outputReaderExecutor.shutdownNow();
+                outputReaderExecutor = null;
+            }
+
+            if (sendExit && processWriter != null && mccProcess != null && mccProcess.isAlive()) {
+                try {
+                    processWriter.write("/exit " + config.exitCode);
+                    processWriter.newLine();
+                    processWriter.flush();
+                    long giveUp = System.currentTimeMillis() + 5000;
+                    while (mccProcess.isAlive() && System.currentTimeMillis() < giveUp) Thread.sleep(100);
+                    if (mccProcess.isAlive()) mccProcess.destroy();
+                } catch (Exception e) {
+                    mccProcess.destroy();
+                }
+            } else {
+                if (mccProcess != null && mccProcess.isAlive()) {
+                    mccProcess.destroy();
+                }
+            }
+            if (mccProcess != null && mccProcess.isAlive()) {
+                try { mccProcess.waitFor(2, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+                if (mccProcess.isAlive()) {
+                    mccProcess.destroyForcibly();
+                    try { mccProcess.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+                }
+            }
+
+            if (waitForExitThread != null) {
+                waitForExitThread.interrupt();
+                waitForExitThread = null;
+            }
+            if (processWriter != null) {
+                try { processWriter.close(); } catch (IOException ignored) {}
+                processWriter = null;
+            }
+
+            immersiveSubscribers.clear();
+            statusSubscribers.clear();
+            currentPid.set(-1);
+            closeLogger();
+            if (statusMonitor != null) statusMonitor.stop();
+            sendInstanceRemovedPacket();
+        } finally {
+            processLock.writeLock().unlock();
+        }
+    }
+
+    public void restart() {
+        if (!startOperation(OperationState.RESTARTING)) return;
+        CompletableFuture.runAsync(() -> {
+            try {
+                LOGGER.info("[{}] Restarting instance...", instanceId);
+                stopInternal(true);
+                try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                startInternal();
+                LOGGER.info("[{}] Restart sequence completed for instance", instanceId);
+            } finally {
+                endOperation();
+            }
+        }, scheduler);
+    }
+
+    public void forceStop() {
+        stop(false);
+    }
+
+    // ==================== å‘½ä»¤è¾“å…¥ ====================
+    public void sendCommand(String command) {
+        processLock.readLock().lock();
+        try {
+            if (!running.get() || processWriter == null) return;
+            processWriter.write(command);
+            processWriter.newLine();
+            processWriter.flush();
+        } catch (IOException e) {
+            LOGGER.error("[{}] Failed to send command", instanceId, e);
+        } finally {
+            processLock.readLock().unlock();
+        }
+    }
+
+    // ==================== è¾“å‡ºè®¢é˜… ====================
+    public void addImmersiveSubscriber(ServerPlayer player, boolean canInput) {
+        immersiveSubscribers.add(player);
+        List<LogEntry> history = outputRing.getLast(outputRing.size());
+        for (LogEntry entry : history) {
+            MCCInServer.sendToPlayer(player, new MCCOutputPacket(instanceId, entry.message));
+        }
+        MCCInServer.sendToPlayer(player, new ImmersiveStatusPacket(instanceId, true, canInput));
+    }
+
+    public void removeImmersiveSubscriber(ServerPlayer player) {
+        immersiveSubscribers.remove(player);
+        MCCInServer.sendToPlayer(player, new ImmersiveStatusPacket(instanceId, false, false));
+    }
+
+    public boolean isSubscribed(ServerPlayer player) {
+        return immersiveSubscribers.contains(player);
+    }
+
+    public void addStatusSubscriber(ServerPlayer player) {
+        statusSubscribers.add(player);
+    }
+
+    public void removeStatusSubscriber(ServerPlayer player) {
+        statusSubscribers.remove(player);
+    }
+
+    public void broadcastStatus() {
+        if (statusSubscribers.isEmpty()) return;
+        StatusDataPacket pkt = buildStatusPacket();
+        MCCInServer.executeOnServerThread(() -> {
+            for (ServerPlayer player : List.copyOf(statusSubscribers)) {
+                if (player.isRemoved()) statusSubscribers.remove(player);
+                else PacketDistributor.sendToPlayer(player, pkt);
+            }
+        });
+    }
+
+    private StatusDataPacket buildStatusPacket() {
+        boolean running = isRunning();
+        String uptime = statusMonitor != null ? statusMonitor.getUptimeFormatted() : "N/A";
+        double cpu = statusMonitor != null ? statusMonitor.getCpuUsage() : -1;
+        long mem = statusMonitor != null ? statusMonitor.getMemoryMB() : -1;
+        double down = statusMonitor != null ? statusMonitor.getDownloadSpeedKBps() : -1;
+        double up = statusMonitor != null ? statusMonitor.getUploadSpeedKBps() : -1;
+        long rx = statusMonitor != null ? statusMonitor.getTotalRxMB() : -1;
+        long tx = statusMonitor != null ? statusMonitor.getTotalTxMB() : -1;
+        return new StatusDataPacket(instanceId, running, uptime, cpu, mem, down, up, rx, tx);
+    }
+
+    private void broadcastToSubscribers(String raw) {
+        if (immersiveSubscribers.isEmpty()) return;
+        MCCOutputPacket pkt = new MCCOutputPacket(instanceId, raw);
+        MCCInServer.executeOnServerThread(() -> {
+            for (ServerPlayer player : List.copyOf(immersiveSubscribers)) {
+                if (player.isRemoved()) immersiveSubscribers.remove(player);
+                else PacketDistributor.sendToPlayer(player, pkt);
+            }
+        });
+    }
+
+    // ==================== æ§åˆ¶å°æ²‰æµ¸æ¨¡å¼ ====================
+    public void setImmersiveConsole(boolean enabled) {
+        if (immersiveConsole.compareAndSet(!enabled, enabled)) {
+            if (enabled) printHistoryToConsole();
+        }
+    }
+
+    public boolean isImmersiveConsole() { return immersiveConsole.get(); }
+
+    private void printHistoryToConsole() {
+        CompletableFuture.runAsync(() -> {
+            List<LogEntry> all = outputRing.getLast(outputRing.size());
+            int last = consoleLastPrintedIndex.get();
+            if (last >= all.size()) return;
+            all.subList(last, all.size()).forEach(e -> printToConsole(e.message, e.timestamp));
+            consoleLastPrintedIndex.set(all.size());
+        });
+    }
+
+    private void printToConsole(String message, long timestamp) {
+        boolean alone = config.outputAlone;
+        StringBuilder sb = new StringBuilder();
+        if (alone) {
+            if (config.outputWithTime) {
+                String time = new SimpleDateFormat(config.outputTimeFormat).format(new Date(timestamp));
+                sb.append('[').append(time).append("] ");
+            }
+            sb.append('[').append(instanceId).append("] ").append(message);
+            ALONE_LOGGER.info(sb.toString());
+        } else {
+            System.out.println("[" + instanceId + "] " + message);
+        }
+    }
+
+    // ==================== å·¥å…·æ–¹æ³• ====================
+    public boolean isRunning() { return running.get(); }
+    public String getId() { return instanceId; }
+    public MISConfig.InstanceConfig getConfig() { return config; }
+    public List<String> getRecentOutput(int lines) {
+        return outputRing.getLast(Math.min(lines, outputRing.size())).stream().map(e -> e.message).toList();
+    }
+    public Process getProcess() { return mccProcess; }
+    public long getPid() { return currentPid.get(); }
+    public RingBuffer<LogEntry> getOutputRing() { return outputRing; }
+    public StatusMonitor getStatusMonitor() { return statusMonitor; }
+    public ScheduledExecutorService getScheduler() { return scheduler; }
+    public void removeDisconnectedPlayer(UUID uuid) {
+        immersiveSubscribers.removeIf(p -> p.getUUID().equals(uuid));
+        statusSubscribers.removeIf(p -> p.getUUID().equals(uuid));
+    }
+
+    public void resizeBuffer(int newSize) {
+        outputRing.resize(newSize);
+    }
+
+    public void updateConfig(MISConfig.InstanceConfig newConfig) {
+        this.config = newConfig;
+        resizeBuffer(newConfig.historyLimit);
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/MCCManager.java
+package com.xiaoze_qwq_.mis;
+
+import com.xiaoze_qwq_.mis.config.MISConfig;
+
+import java.util.*;
+import java.util.concurrent.*;
+
+public class MCCManager {
+    private static final MCCManager INSTANCE = new MCCManager();
+    private final Map<String, MCCInstance> instances = new ConcurrentHashMap<>();
+
+    private MCCManager() {}
+
+    public static MCCManager getInstance() { return INSTANCE; }
+
+    // ==================== å®ä¾‹ç®¡ç† ====================
+    public void loadInstances() {
+        MISConfig.getAllInstances().forEach(cfg -> {
+            MCCInstance instance = new MCCInstance(cfg.id, cfg);
+            instances.put(cfg.id, instance);
+            if (cfg.autoStart) {
+                long delay = cfg.startupDelaySeconds;
+                if (delay > 0) {
+                    instance.getScheduler().schedule(instance::start, delay, TimeUnit.SECONDS);
+                } else {
+                    instance.start();
+                }
+            }
+        });
+    }
+
+    public void reloadInstances() {
+        Map<String, MCCInstance> oldInstances = new HashMap<>(instances);
+        MISConfig.load();
+        Collection<MISConfig.InstanceConfig> newConfigs = MISConfig.getAllInstances();
+        for (MISConfig.InstanceConfig cfg : newConfigs) {
+            MCCInstance existing = oldInstances.get(cfg.id);
+            if (existing != null) {
+                existing.updateConfig(cfg);
+                oldInstances.remove(cfg.id);
+            } else {
+                MCCInstance newInstance = new MCCInstance(cfg.id, cfg);
+                instances.put(cfg.id, newInstance);
+                if (cfg.autoStart) {
+                    long delay = cfg.startupDelaySeconds;
+                    if (delay > 0) {
+                        newInstance.getScheduler().schedule(newInstance::start, delay, TimeUnit.SECONDS);
+                    } else {
+                        newInstance.start();
+                    }
+                }
+            }
+        }
+        for (MCCInstance removed : oldInstances.values()) {
+            instances.remove(removed.getId());
+            removed.stop(true);
+        }
+    }
+
+    public void shutdownAll() {
+        instances.values().forEach(inst -> inst.stop(true));
+        instances.clear();
+    }
+
+    public MCCInstance getInstance(String id) {
+        return instances.get(id);
+    }
+
+    public Collection<MCCInstance> getAllInstances() {
+        return instances.values();
+    }
+
+    public boolean hasInstance(String id) {
+        return instances.containsKey(id);
+    }
+
+    /**
+     * é€šè¿‡åç§°ï¼ˆä¸åŒºåˆ†å¤§å°å†™ï¼‰æŸ¥æ‰¾å®ä¾‹
+     */
+    public MCCInstance getInstanceByName(String name) {
+        String lowerName = name.toLowerCase(Locale.ROOT);
+        for (MCCInstance inst : instances.values()) {
+            if (inst.getConfig().name.toLowerCase(Locale.ROOT).equals(lowerName)) {
+                return inst;
+            }
+        }
+        return null;
+    }
+
+    // ==================== ç»Ÿä¸€ç©å®¶ç®¡ç† ====================
+    public void removeDisconnectedPlayer(UUID uuid) {
+        instances.values().forEach(inst -> inst.removeDisconnectedPlayer(uuid));
+    }
+
+    public void start() {
+        loadInstances();
+    }
+
+    public void stop() {
+        shutdownAll();
+    }
+}
+./main/java/com/xiaoze_qwq_/mis/MISSessionManager.java
+package com.xiaoze_qwq_.mis;
+
+import com.moandjiezana.toml.Toml;
+import net.minecraft.server.level.ServerPlayer;
+import net.neoforged.fml.loading.FMLPaths;
+
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.Reader;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+public class MISSessionManager {
+    private static final MISSessionManager INSTANCE = new MISSessionManager();
+    private static final Path AUTH_FILE = FMLPaths.CONFIGDIR.get().resolve("mis_auth.toml");
+    private static final long DEFAULT_AUTH_DURATION_MS = 24L * 60L * 60L * 1000L;
+
+    private final Map<UUID, MISAuthCookie> cookies = new ConcurrentHashMap<>();
+
+    private MISSessionManager() {}
+
+    public static MISSessionManager getInstance() {
+        return INSTANCE;
+    }
+
+    public void load() {
+        if (!Files.exists(AUTH_FILE)) return;
+        try (Reader reader = new InputStreamReader(Files.newInputStream(AUTH_FILE), StandardCharsets.UTF_8)) {
+            Toml toml = new Toml().read(reader);
+            List<Toml> auths = toml.getTables("auth");
+            if (auths == null) return;
+            for (Toml t : auths) {
+                String uuidStr = t.getString("uuid");
+                if (uuidStr == null) continue;
+                try {
+                    UUID uuid = UUID.fromString(uuidStr);
+                    MISAuthCookie cookie = new MISAuthCookie(
+                            uuid,
+                            t.getString("username", ""),
+                            t.getString("ip", ""),
+                            t.getLong("grantedAt", 0L),
+                            t.getLong("expiresAt", 0L),
+                            t.getString("uid", ""));
+                    cookies.put(uuid, cookie);
+                } catch (IllegalArgumentException ignored) {
+                }
+            }
+        } catch (IOException e) {
+            MCCInServer.LOGGER.error("Failed to load mis_auth.toml", e);
+        }
+    }
+
+    private synchronized void save() {
+        try (Writer writer = new OutputStreamWriter(Files.newOutputStream(AUTH_FILE), StandardCharsets.UTF_8)) {
+            writer.write("# MIS Authentication Cookies\n\n");
+            for (MISAuthCookie c : cookies.values()) {
+                writer.write("[[auth]]\n");
+                writer.write("uuid = \"" + c.uuid() + "\"\n");
+                writer.write("username = \"" + escape(c.username()) + "\"\n");
+                writer.write("ip = \"" + escape(c.ip()) + "\"\n");
+                writer.write("grantedAt = " + c.grantedAt() + "\n");
+                writer.write("expiresAt = " + c.expiresAt() + "\n");
+                writer.write("uid = \"" + escape(c.uid()) + "\"\n\n");
+            }
+        } catch (IOException e) {
+            MCCInServer.LOGGER.error("Failed to save mis_auth.toml", e);
+        }
+    }
+
+    private static String escape(String s) {
+        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    // ==================== æˆæƒç®¡ç† ====================
+
+    public void grant(ServerPlayer player, long durationMs) {
+        grant(player.getUUID(), player.getGameProfile().getName(), ipOf(player), durationMs, "");
+    }
+
+    public void grant(UUID uuid, String username, String ip, long durationMs, String uid) {
+        long now = System.currentTimeMillis();
+        cookies.put(uuid, new MISAuthCookie(uuid, username, ip, now, now + durationMs, uid));
+        save();
+    }
+
+    public void revoke(UUID uuid) {
+        cookies.remove(uuid);
+        save();
+    }
+
+    public boolean isInMISMode(ServerPlayer player) {
+        MISAuthCookie c = cookies.get(player.getUUID());
+        if (c == null) return false;
+        return c.expiresAt() > System.currentTimeMillis();
+    }
+
+    public boolean hasCookie(UUID uuid) {
+        return cookies.containsKey(uuid);
+    }
+
+    public MISAuthCookie getCookie(UUID uuid) {
+        return cookies.get(uuid);
+    }
+
+    public Collection<MISAuthCookie> listCookies() {
+        return new ArrayList<>(cookies.values());
+    }
+
+    public void purgeExpired() {
+        long now = System.currentTimeMillis();
+        boolean changed = cookies.values().removeIf(c -> c.expiresAt() <= now);
+        if (changed) save();
+    }
+
+    private static String ipOf(ServerPlayer player) {
+        try {
+            if (player.connection != null && player.connection.getRemoteAddress() != null) {
+                return player.connection.getRemoteAddress().toString();
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
+    public static long defaultDurationMs() {
+        return DEFAULT_AUTH_DURATION_MS;
+    }
+
+    public record MISAuthCookie(UUID uuid, String username, String ip, long grantedAt, long expiresAt, String uid) {
+        public long remainingMs() {
+            return expiresAt - System.currentTimeMillis();
+        }
+    }
+}
+
+./main/resources/META-INF/neoforge.mods.toml
+modLoader="javafml"
+license="${mod_license}"
+loaderVersion="${loader_version_range}"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+logoFile="mccinserver-icon.png"
+credits="xiaoze_qwq_"
+authors="xiaoze_qwq_"
+description='''
+Run MCC (Minecraft Console Client) inside Minecraft Server.
+'''
+
+[[dependencies.${mod_id}]]
+modId="neoforge"
+mandatory=true
+versionRange="[21.1,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="minecraft"
+mandatory=true
+versionRange="${minecraft_version_range}"
+ordering="NONE"
+side="BOTH"
+./main/resources/assets/mccinserver/lang/en_us.json
+{
+    "mis.error.no_password": "No password set. Set one from the server console with /mis set password <password>.",
+    "mis.error.wrong_password": "Wrong password.",
+    "mis.error.verify_locked": "Too many failed attempts. Try again in %d seconds.",
+    "mis.error.not_in_mis_mode": "You are not in MIS mode.",
+    "mis.error.instance_not_found": "No instance with ID or name '%s' found.",
+    "mis.error.already_running": "MCC is already running.",
+    "mis.error.not_running": "MCC is not running.",
+    "mis.error.other_operation": "Other switch operation is currently in progress for instance %s.",
+    "mis.error.commandblock": "Command blocks cannot use MIS commands.",
+    "mis.error.mcc_not_running": "MCC process is not running. Use /mis restart to start it.",
+    "mis.error.immersive_console_only": "Immersive mode is only available from console.",
+
+    "mis.verify.console_info": "Console does not need verification.",
+    "mis.verify.success": "Verification successful. You are now in MIS mode.",
+    "mis.verify.no_output": "No output history.",
+    "mis.verify.output_header": "--- Last %d lines of MCC output ---",
+    "mis.verify.already_has_permission": "You already have mis.mismode permission, no verification needed.",
+
+    "mis.set.password.success": "Password set.",
+    "mis.set.password.console_only": "The password can only be set from the server console.",
+    "mis.set.password.empty": "The password cannot be empty.",
+    "mis.unset.password.success": "Password cleared. Players can no longer verify with /mis verify.",
+    "mis.auth.console_only": "Auth management commands can only be used from the server console.",
+    "mis.auth.list.none": "No authorization records found.",
+    "mis.auth.player_not_found": "Player '%s' is not online or does not exist.",
+    "mis.auth.invalid_uuid": "'%s' is not a valid UUID.",
+    "mis.auth.grant.success": "Granted MIS authorization to player %s for %d seconds.",
+    "mis.auth.grantuuid.success": "Granted MIS authorization to UUID %s for %d seconds.",
+    "mis.auth.revoke.not_found": "No authorization record for that player or UUID.",
+    "mis.auth.revoke.success": "Revoked MIS authorization for UUID %s.",
+    "mis.status.player_authorized": "You have MIS authorization for %d more seconds.",
+    "mis.status.player_unauthorized": "You have no MIS authorization. Use /mis verify <password> to verify.",
+    "mis.set.history.success": "MCC output history limit set to %d lines.",
+    "mis.set.maxarchives.success": "Maximum archives set to %d.",
+    "mis.set.exitcode.success": "Exit code set to %d.",
+    "mis.set.restart_required": "This change requires MCC restart to take effect.",
+    "mis.set.autorestart.enabled": "Auto-restart enabled.",
+    "mis.set.autorestart.disabled": "Auto-restart disabled.",
+    "mis.set.srs.success": "Status refresh interval set to %d seconds.",
+    "mis.set.processmonitor.enabled": "Process monitor enabled.",
+    "mis.set.processmonitor.disabled": "Process monitor disabled.",
+    "mis.set.networkmonitor.enabled": "Network monitor enabled.",
+    "mis.set.networkmonitor.disabled": "Network monitor disabled.",
+    "mis.set.compressionformat.success": "Compression format set to %s.",
+    "mis.set.compressionstrategy.success": "Compression strategy set to %s.",
+    "mis.set.scm.success": "Scheduled compression minutes set to %d.",
+    "mis.set.savelogtime.enabled": "Log timestamps enabled.",
+    "mis.set.savelogtime.disabled": "Log timestamps disabled.",
+    "mis.set.timeformat.success": "Time format set to %s.",
+    "mis.set.invalid_format": "Invalid format. Use tar.gz or zip.",
+    "mis.set.invalid_strategy": "Invalid strategy. Available: OLD, ASYNC, IDLE, SCHEDULED.",
+    "mis.set.help.title": "--- Instance Set Commands ---",
+    "mis.set.help.history": "/mis <id> set history <lines> - Set output history limit",
+    "mis.set.help.maxarchives": "/mis <id> set maxarchives <count> - Set max number of compressed archives",
+    "mis.set.help.exitcode": "/mis <id> set exitcode <code> - Set exit code (requires restart)",
+    "mis.set.help.autorestart": "/mis <id> set autorestart enable/disable - Toggle auto-restart",
+    "mis.set.help.srs": "/mis <id> set statusrefreshseconds <sec> - Set status refresh interval",
+    "mis.set.help.processmonitor": "/mis <id> set processmonitor enable/disable - Toggle process monitoring",
+    "mis.set.help.networkmonitor": "/mis <id> set networkmonitor enable/disable - Toggle network monitoring",
+    "mis.set.help.compressionformat": "/mis <id> set compressionformat tar.gz/zip - Set compression format",
+    "mis.set.help.compressionstrategy": "/mis <id> set compressionstrategy OLD/ASYNC/IDLE/SCHEDULED - Set compression strategy",
+    "mis.set.help.scm": "/mis <id> set scheduledcompressionminutes <minutes> - Set scheduled compression interval",
+    "mis.set.help.savelogtime": "/mis <id> set savelogtime enable/disable - Toggle timestamp in logs",
+    "mis.set.help.timeformat": "/mis <id> set timeformat <format> - Set timestamp format (e.g. HH:mm:ss)",
+    "mis.set.help.mccpath": "/mis <id> set mccpath <path> - Set MCC executable path (restart required)",
+    "mis.set.help.outputalone": "/mis <id> set outputalone enable/disable - Toggle output bypassing Minecraft logging",
+    "mis.set.help.outputwithtime": "/mis <id> set outputwithtime enable/disable - Toggle timestamps when outputAlone is enabled",
+    "mis.set.help.outputtimeformat": "/mis <id> set outputtimeformat <format> - Set timestamp format (e.g. HH:mm:ss) for outputAlone",
+    "mis.set.help.note": "Note: Some settings require MCC restart.",
+
+    "mis.immersive.already_on": "Immersive mode is already ON.",
+    "mis.immersive.on": "Immersive mode ON. New MCC output will be printed to console.",
+    "mis.immersive.already_off": "Immersive mode is already OFF.",
+    "mis.immersive.off": "Immersive mode OFF. MCC output will not be printed to console.",
+    "mis.immersive.already_on_player": "Immersive mode is already ON for you.",
+    "mis.immersive.on_player": "Immersive mode ON. A window will open to display MCC output.",
+    "mis.immersive.already_off_player": "Immersive mode is already OFF for you.",
+    "mis.immersive.window_title": "MCC Console Output",
+    "mis.immersive.close_button": "Close",
+
+    "mis.status.opening_gui": "Opening status monitor GUI...",
+    "mis.status.window_title": "MIS Status Monitor",
+    "mis.status.close_button": "Close",
+    "mis.status.uptime": "MCC Uptime: %s",
+    "mis.status.total_traffic": "Total Traffic: â†“ %d MB  â†‘ %d MB",
+    "mis.status.network_speed": "Network Speed",
+    "mis.status.cpu": "CPU",
+    "mis.status.memory": "Memory",
+    "mis.status.chart_title": "Real-time Metrics",
+    "mis.status.chart_x_axis": "Time (samples)",
+    "mis.status.chart_y_axis": "Value",
+    "mis.status.download": "Download",
+    "mis.status.upload": "Upload",
+    "mis.status.chart_loading": "Loading chart...",
+    "mis.status.chart_error": "Chart generation error",
+    "mis.status.monitor_unavailable": "Monitor unavailable.",
+    "mis.status.restarting": "Restarting...",
+    "mis.status.stopping": "Stopping...",
+    "mis.status.force_stopping": "Force-Stopping...",
+
+    "mis.exit.success": "Exited MIS mode.",
+    "mis.exit.console_not_allowed": "Console cannot exit MIS mode.",
+    "mis.reload.success": "Configuration reloaded. Note: Some changes may require MCC restart.",
+    "mis.restart.success": "Restarting instance...",
+    "mis.stop.success": "Stopping instance...",
+    "mis.start.success": "Starting instance...",
+    "mis.forcestop.success": "Force stopping instance...",
+    "mis.help.title": "/mis verify <pwd> | /mis <id> <cmd> | /mis reload",
+    "mis.help.line1": "/mis verify <password> - Enter MIS mode (players only)",
+    "mis.help.line2": "/mis <id> input <command> - Send command to MCC",
+    "mis.help.line3": "/mis <id> set history <lines> - Set MCC output history limit",
+    "mis.help.line4": "/mis immersive on/off - Toggle immersive output (console only)",
+    "mis.help.line5": "/mis ping <host> [port] - Test TCP connectivity (default port 25565)",
+    "mis.help.line6": "/mis <id> restart - Restart MCC process",
+    "mis.help.line7": "/mis <id> stop - Stop MCC process",
+    "mis.help.line8": "Console can use all commands without verification.",
+    "mis.help.forceStop": "/mis <id> forcestop - Force stop MCC process",
+    "mis.help.status": "/mis <id> status - Show status monitor GUI",
+    "mis.help.exit": "/mis exit - Exit MIS mode (players only)",
+    "mis.help.reload": "/mis reload - Reload configuration files",
+    "mis.help.refreshlog": "/mis refreshlog - Re-merge compressed archives",
+
+    "mis.ping.start": "Pinging %s:%d...",
+    "mis.ping.resolve_failed": "Failed to resolve host: %s",
+    "mis.ping.reply": "Reply from %s: time=%dms (port %d open)",
+    "mis.ping.no_response": "No response from %s:%d (timeout %dms)",
+    "mis.ping.failed": "Ping failed: %s",
+    "mis.refreshlog.success": "Merged logs refreshed successfully.",
+    "mis.refreshlog.single": "Only one merged archive found, no need to refresh."
+}
+./main/resources/assets/mccinserver/lang/zh_cn.json
+{
+    "mis.error.no_password": "æœªè®¾ç½®å¯†ç ã€‚è¯·å…ˆåœ¨æœåŠ¡å™¨æ§åˆ¶å°ä½¿ç”¨ /mis set password <å¯†ç > è®¾ç½®å¯†ç ã€‚",
+    "mis.error.wrong_password": "å¯†ç é”™è¯¯ã€‚",
+    "mis.error.verify_locked": "éªŒè¯å¤±è´¥æ¬¡æ•°è¿‡å¤šï¼Œè¯· %d ç§’åå†è¯•ã€‚",
+    "mis.error.not_in_mis_mode": "æ‚¨æœªå¤„äº MIS æ¨¡å¼ã€‚è¯·å…ˆä½¿ç”¨ /mis verify <å¯†ç > éªŒè¯ã€‚",
+    "mis.error.instance_not_found": "æœªæ‰¾åˆ° ID æˆ–åç§°ä¸º '%s' çš„å®ä¾‹ã€‚",
+    "mis.error.already_running": "MCC å·²åœ¨è¿è¡Œã€‚",
+    "mis.error.not_running": "MCC æœªåœ¨è¿è¡Œã€‚",
+    "mis.error.other_operation": "å®ä¾‹ %s å½“å‰æ­£åœ¨è¿›è¡Œå…¶ä»–å¼€å…³æ“ä½œã€‚",
+    "mis.error.commandblock": "å‘½ä»¤æ–¹å—ä¸èƒ½ä½¿ç”¨ MIS å‘½ä»¤ã€‚",
+    "mis.error.mcc_not_running": "MCC è¿›ç¨‹æœªè¿è¡Œã€‚è¯·ä½¿ç”¨ /mis restart å¯åŠ¨ã€‚",
+    "mis.error.immersive_console_only": "æ²‰æµ¸æ¨¡å¼ä»…é€‚ç”¨äºæ§åˆ¶å°ã€‚",
+
+    "mis.verify.console_info": "æ§åˆ¶å°æ— éœ€éªŒè¯ã€‚ã€‚",
+    "mis.verify.success": "éªŒè¯æˆåŠŸã€‚æ‚¨ç°åœ¨å¤„äº MIS æ¨¡å¼ã€‚",
+    "mis.verify.no_output": "æ²¡æœ‰è¾“å‡ºå†å²ã€‚",
+    "mis.verify.output_header": "--- MCC æœ€è¿‘ %d è¡Œè¾“å‡º ---",
+    "mis.verify.already_has_permission": "æ‚¨å·²æ‹¥æœ‰ mis.mismode æƒé™ï¼Œæ— éœ€éªŒè¯ã€‚",
+
+    "mis.set.password.success": "å¯†ç å·²è®¾ç½®ã€‚",
+    "mis.set.password.console_only": "åªèƒ½åœ¨æœåŠ¡å™¨æ§åˆ¶å°è®¾ç½®å¯†ç ã€‚",
+    "mis.set.password.empty": "å¯†ç ä¸èƒ½ä¸ºç©ºã€‚",
+    "mis.unset.password.success": "å¯†ç å·²æ¸…é™¤ã€‚ç©å®¶å°†æ— æ³•å†ä½¿ç”¨ /mis verify éªŒè¯ã€‚",
+    "mis.auth.console_only": "æˆæƒç®¡ç†å‘½ä»¤åªèƒ½åœ¨æœåŠ¡å™¨æ§åˆ¶å°ä½¿ç”¨ã€‚",
+    "mis.auth.list.none": "å½“å‰æ²¡æœ‰ä»»ä½•æˆæƒè®°å½•ã€‚",
+    "mis.auth.player_not_found": "ç©å®¶ '%s' ä¸åœ¨çº¿æˆ–ä¸å­˜åœ¨ã€‚",
+    "mis.auth.invalid_uuid": "'%s' ä¸æ˜¯æœ‰æ•ˆçš„ UUIDã€‚",
+    "mis.auth.grant.success": "å·²æˆäºˆç©å®¶ %s çš„ MIS æˆæƒï¼Œæœ‰æ•ˆæœŸ %d ç§’ã€‚",
+    "mis.auth.grantuuid.success": "å·²æˆäºˆ UUID %s çš„ MIS æˆæƒï¼Œæœ‰æ•ˆæœŸ %d ç§’ã€‚",
+    "mis.auth.revoke.not_found": "è¯¥ç©å®¶æˆ– UUID æ²¡æœ‰æˆæƒè®°å½•ã€‚",
+    "mis.auth.revoke.success": "å·²æ’¤é”€ UUID %s çš„ MIS æˆæƒã€‚",
+    "mis.status.player_authorized": "æ‚¨å·²è·å¾— MIS æˆæƒï¼Œå‰©ä½™ %d ç§’ã€‚",
+    "mis.status.player_unauthorized": "æ‚¨æ²¡æœ‰ MIS æˆæƒã€‚è¯·ä½¿ç”¨ /mis verify <å¯†ç > éªŒè¯ã€‚",
+    "mis.set.history.success": "MCC è¾“å‡ºå†å²è®°å½•ä¸Šé™å·²è®¾ä¸º %d è¡Œã€‚",
+    "mis.set.maxarchives.success": "æœ€å¤§å½’æ¡£æ•°é‡å·²è®¾ä¸º %dã€‚",
+    "mis.set.exitcode.success": "é€€å‡ºç å·²è®¾ä¸º %dã€‚",
+    "mis.set.restart_required": "æ­¤æ›´æ”¹éœ€è¦é‡å¯ MCC æ‰èƒ½ç”Ÿæ•ˆã€‚",
+    "mis.set.autorestart.enabled": "è‡ªåŠ¨é‡å¯å·²å¯ç”¨ã€‚",
+    "mis.set.autorestart.disabled": "è‡ªåŠ¨é‡å¯å·²ç¦ç”¨ã€‚",
+    "mis.set.srs.success": "çŠ¶æ€åˆ·æ–°é—´éš”å·²è®¾ä¸º %d ç§’ã€‚",
+    "mis.set.processmonitor.enabled": "è¿›ç¨‹ç›‘æ§å·²å¯ç”¨ã€‚",
+    "mis.set.processmonitor.disabled": "è¿›ç¨‹ç›‘æ§å·²ç¦ç”¨ã€‚",
+    "mis.set.networkmonitor.enabled": "ç½‘ç»œç›‘æ§å·²å¯ç”¨ã€‚",
+    "mis.set.networkmonitor.disabled": "ç½‘ç»œç›‘æ§å·²ç¦ç”¨ã€‚",
+    "mis.set.compressionformat.success": "å‹ç¼©æ ¼å¼å·²è®¾ä¸º %sã€‚",
+    "mis.set.compressionstrategy.success": "å‹ç¼©ç­–ç•¥å·²è®¾ä¸º %sã€‚",
+    "mis.set.scm.success": "å®šæ—¶å‹ç¼©é—´éš”å·²è®¾ä¸º %d åˆ†é’Ÿã€‚",
+    "mis.set.savelogtime.enabled": "æ—¥å¿—æ—¶é—´æˆ³å·²å¯ç”¨ã€‚",
+    "mis.set.savelogtime.disabled": "æ—¥å¿—æ—¶é—´æˆ³å·²ç¦ç”¨ã€‚",
+    "mis.set.timeformat.success": "æ—¶é—´æ ¼å¼å·²è®¾ä¸º %sã€‚",
+    "mis.set.invalid_format": "æ— æ•ˆçš„æ ¼å¼ã€‚è¯·ä½¿ç”¨ tar.gz æˆ– zipã€‚",
+    "mis.set.invalid_strategy": "æ— æ•ˆçš„ç­–ç•¥ã€‚å¯ç”¨ï¼šOLD, ASYNC, IDLE, SCHEDULEDã€‚",
+    "mis.set.help.title": "--- å®ä¾‹è®¾ç½®å‘½ä»¤ ---",
+    "mis.set.help.history": "/mis <id> set history <è¡Œæ•°> - è®¾ç½®è¾“å‡ºå†å²è®°å½•ä¸Šé™",
+    "mis.set.help.maxarchives": "/mis <id> set maxarchives <æ•°é‡> - è®¾ç½®æœ€å¤§å½’æ¡£å‹ç¼©åŒ…æ•°é‡",
+    "mis.set.help.exitcode": "/mis <id> set exitcode <ä»£ç > - è®¾ç½®é€€å‡ºç ï¼ˆéœ€é‡å¯ï¼‰",
+    "mis.set.help.autorestart": "/mis <id> set autorestart enable/disable - åˆ‡æ¢è‡ªåŠ¨é‡å¯",
+    "mis.set.help.srs": "/mis <id> set statusrefreshseconds <ç§’> - è®¾ç½®çŠ¶æ€åˆ·æ–°é—´éš”",
+    "mis.set.help.processmonitor": "/mis <id> set processmonitor enable/disable - åˆ‡æ¢è¿›ç¨‹ç›‘æ§",
+    "mis.set.help.networkmonitor": "/mis <id> set networkmonitor enable/disable - åˆ‡æ¢ç½‘ç»œç›‘æ§",
+    "mis.set.help.compressionformat": "/mis <id> set compressionformat tar.gz/zip - è®¾ç½®å‹ç¼©æ ¼å¼",
+    "mis.set.help.compressionstrategy": "/mis <id> set compressionstrategy OLD/ASYNC/IDLE/SCHEDULED - è®¾ç½®å‹ç¼©ç­–ç•¥",
+    "mis.set.help.scm": "/mis <id> set scheduledcompressionminutes <åˆ†é’Ÿ> - è®¾ç½®å®šæ—¶å‹ç¼©é—´éš”",
+    "mis.set.help.savelogtime": "/mis <id> set savelogtime enable/disable - åˆ‡æ¢æ—¥å¿—æ—¶é—´æˆ³",
+    "mis.set.help.timeformat": "/mis <id> set timeformat <æ ¼å¼> - è®¾ç½®æ—¶é—´æˆ³æ ¼å¼ï¼ˆå¦‚ HH:mm:ssï¼‰",
+    "mis.set.help.mccpath": "/mis <id> set mccpath <è·¯å¾„> - è®¾ç½®MCCå¯æ‰§è¡Œæ–‡ä»¶è·¯å¾„ï¼ˆéœ€é‡å¯ï¼‰",
+    "mis.set.help.outputalone": "/mis <id> set outputalone enable/disable - åˆ‡æ¢è¾“å‡ºæ˜¯å¦ç»•è¿‡Minecraftæ—¥å¿—ç³»ç»Ÿ",
+    "mis.set.help.outputwithtime": "/mis <id> set outputwithtime enable/disable - åˆ‡æ¢outputAloneå¼€å¯æ—¶æ˜¯å¦å¸¦æ—¶é—´æˆ³",
+    "mis.set.help.outputtimeformat": "/mis <id> set outputtimeformat <æ ¼å¼> - è®¾ç½®outputAloneçš„æ—¶é—´æˆ³æ ¼å¼ï¼ˆå¦‚ HH:mm:ssï¼‰",
+    "mis.set.help.note": "æ³¨æ„ï¼šéƒ¨åˆ†è®¾ç½®éœ€è¦é‡å¯ MCC ç”Ÿæ•ˆã€‚",
+
+    "mis.immersive.already_on": "æ²‰æµ¸æ¨¡å¼å·²å¼€å¯ã€‚",
+    "mis.immersive.on": "æ²‰æµ¸æ¨¡å¼å·²å¼€å¯ã€‚æ–°çš„ MCC è¾“å‡ºå°†æ‰“å°åˆ°æ§åˆ¶å°ã€‚",
+    "mis.immersive.already_off": "æ²‰æµ¸æ¨¡å¼å·²å…³é—­ã€‚",
+    "mis.immersive.off": "æ²‰æµ¸æ¨¡å¼å·²å…³é—­ã€‚MCC è¾“å‡ºå°†ä¸å†æ‰“å°åˆ°æ§åˆ¶å°ã€‚",
+    "mis.immersive.already_on_player": "æ²‰æµ¸æ¨¡å¼å·²ç»ä¸ºæ‚¨å¼€å¯ã€‚",
+    "mis.immersive.on_player": "æ²‰æµ¸æ¨¡å¼å·²å¼€å¯ã€‚å°†æ‰“å¼€çª—å£æ˜¾ç¤º MCC è¾“å‡ºã€‚",
+    "mis.immersive.already_off_player": "æ²‰æµ¸æ¨¡å¼å·²ç»ä¸ºæ‚¨å…³é—­ã€‚",
+    "mis.immersive.window_title": "MCC æ§åˆ¶å°è¾“å‡º",
+    "mis.immersive.close_button": "å…³é—­",
+
+    "mis.status.opening_gui": "æ­£åœ¨æ‰“å¼€çŠ¶æ€ç›‘æ§çª—å£...",
+    "mis.status.window_title": "MIS çŠ¶æ€ç›‘æ§",
+    "mis.status.close_button": "å…³é—­",
+    "mis.status.uptime": "MCC è¿è¡Œæ—¶é—´: %s",
+    "mis.status.total_traffic": "æ€»æµé‡: â†“ %d MB  â†‘ %d MB",
+    "mis.status.network_speed": "ç½‘ç»œé€Ÿåº¦",
+    "mis.status.cpu": "CPU",
+    "mis.status.memory": "å†…å­˜",
+    "mis.status.chart_title": "å®æ—¶æ•°æ®è¶‹åŠ¿",
+    "mis.status.chart_x_axis": "æ—¶é—´ (é‡‡æ ·ç‚¹)",
+    "mis.status.chart_y_axis": "æ•°å€¼",
+    "mis.status.download": "ä¸‹è½½",
+    "mis.status.upload": "ä¸Šä¼ ",
+    "mis.status.chart_loading": "å›¾è¡¨åŠ è½½ä¸­...",
+    "mis.status.chart_error": "å›¾è¡¨ç”Ÿæˆé”™è¯¯",
+    "mis.status.monitor_unavailable": "ç›‘æ§ä¸å¯ç”¨ã€‚",
+    "mis.status.restarting": "é‡å¯ä¸­...",
+    "mis.status.stopping": "åœæ­¢ä¸­...",
+    "mis.status.force_stopping": "å¼ºåˆ¶åœæ­¢ä¸­...",
+
+    "mis.exit.success": "å·²é€€å‡º MIS æ¨¡å¼ã€‚",
+    "mis.exit.console_not_allowed": "æ§åˆ¶å°æ— æ³•é€€å‡º MIS æ¨¡å¼ã€‚",
+    "mis.reload.success": "é…ç½®å·²é‡æ–°åŠ è½½ã€‚æ³¨æ„ï¼šéƒ¨åˆ†æ›´æ”¹å¯èƒ½éœ€è¦é‡å¯ MCCã€‚",
+    "mis.restart.success": "æ­£åœ¨é‡å¯å®ä¾‹...",
+    "mis.stop.success": "æ­£åœ¨åœæ­¢å®ä¾‹...",
+    "mis.start.success": "æ­£åœ¨å¯åŠ¨å®ä¾‹...",
+    "mis.forcestop.success": "æ­£åœ¨å¼ºåˆ¶åœæ­¢å®ä¾‹...",
+    "mis.help.title": "/mis verify <å¯†ç > | /mis <ID> <å‘½ä»¤> | /mis reload",
+    "mis.help.line1": "/mis verify <å¯†ç > - è¿›å…¥ MIS æ¨¡å¼ï¼ˆä»…ç©å®¶ï¼‰",
+    "mis.help.line2": "/mis <id> input <å‘½ä»¤> - å‘ MCC å‘é€å‘½ä»¤",
+    "mis.help.line3": "/mis <id> set history <è¡Œæ•°> - è®¾ç½® MCC è¾“å‡ºå†å²è®°å½•ä¸Šé™",
+    "mis.help.line4": "/mis immersive on/off - å¼€å…³æ²‰æµ¸æ¨¡å¼ï¼ˆä»…æ§åˆ¶å°ï¼‰",
+    "mis.help.line5": "/mis ping <ä¸»æœº> [ç«¯å£] - æµ‹è¯• TCP è¿æ¥ï¼ˆé»˜è®¤ç«¯å£ 25565ï¼‰",
+    "mis.help.line6": "/mis <id> restart - é‡å¯ MCC è¿›ç¨‹",
+    "mis.help.line7": "/mis <id> stop - åœæ­¢ MCC è¿›ç¨‹",
+    "mis.help.line8": "æ§åˆ¶å°æ— éœ€éªŒè¯å³å¯ä½¿ç”¨æ‰€æœ‰å‘½ä»¤ã€‚",
+    "mis.help.forceStop": "/mis <id> forcestop - å¼ºåˆ¶åœæ­¢ MCC è¿›ç¨‹",
+    "mis.help.status": "/mis <id> status - æ‰“å¼€çŠ¶æ€ç›‘æ§ç•Œé¢",
+    "mis.help.exit": "/mis exit - é€€å‡º MIS æ¨¡å¼ï¼ˆä»…ç©å®¶ï¼‰",
+    "mis.help.reload": "/mis reload - é‡æ–°åŠ è½½é…ç½®æ–‡ä»¶",
+    "mis.help.refreshlog": "/mis refreshlog - é‡æ–°åˆå¹¶å‹ç¼©å½’æ¡£",
+
+    "mis.ping.start": "æ­£åœ¨ Ping %s:%d ...",
+    "mis.ping.resolve_failed": "æ— æ³•è§£æä¸»æœºï¼š%s",
+    "mis.ping.reply": "æ¥è‡ª %s çš„å›å¤ï¼šæ—¶é—´=%dmsï¼ˆç«¯å£ %d å¼€æ”¾ï¼‰",
+    "mis.ping.no_response": "æ— æ³•è¿æ¥åˆ° %s:%dï¼ˆè¶…æ—¶ %dmsï¼‰",
+    "mis.ping.failed": "Ping å¤±è´¥ï¼š%s",
+    "mis.refreshlog.success": "åˆå¹¶æ—¥å¿—å·²åˆ·æ–°æˆåŠŸã€‚",
+    "mis.refreshlog.single": "ä»…æœ‰ä¸€ä¸ªåˆå¹¶åŒ…ï¼Œæ— éœ€åˆ·æ–°ã€‚"
+}
+./main/resources/assets/mccinserver/icon.png
+‰PNG
+
+   IHDR   €   €   Ã>aË   IDATxìİœmE ğ,l,Ä~˜`>;àg`ûÄ0QQŸèïa€‰‰¨ (¢<ì[ì¦;İÿÙ÷]æ½çî½»wï½»{ö·s§¾™3ñÍW3gÎf´«z6KíßªVõô§Ô"@‹ «|Vy÷[
+Ğ"À*UŞı–¬Rˆn·#±JıVéÄG·[ˆ‘X¥~‹ «tâ£Û-ÄH¬R¿E€U:ñÑíb$V©ß"À*›øzw[¨È*‹·°Ê&¼Şİ‰#À\~ó›ß¤Ï~ö³éä“O®·¯oüˆ#H[n¹eºüå/Ÿ„û˜yÒI'¥#<2½óïLO~ò“Ó+^ñŠªmÿûß“¶XMO°ıë_U]¯{İëªºùõ¿ÿı¯'ü8'Š ôMozSºÑn”øÀ¦‡>ô¡éÔSOMƒüıîw¿KOxÂÒşóŸ
+qÿüç§ÿûßi¡¿üå/Ó½îu¯´Å[¤wÜ1=ıéOOï}ï{Ó^{íUµí×¸FºêU¯šößÿtÆgü}üÚ×¾–nyË[¦­¶Úªªë…/|aU7ß³®|å+§m·İ6}úÓŸNçw^çßDà¸ãKûî»o§¿GuT:æ˜c:ñ~C=4ıãÿè€˜ÀŸşô§ø ş–·¼%İìf7K_úÒ—úƒlîV·ºU:öØcûÂÊ„(Ï}îsÓİîv·yûõ«_ı*­[·®B¾şóŸŠÅM~ö³Ÿ¥¿ıío{î¹é{ßû^'Ş@%ê$ßJ¤lYç9çœ“öØc´~ıútşùç—Y}Ã&k·İvKØE ¼vÚ©Á›`Ëô¯|å+éÙÏ~v2eúR…'Š ßıîwçôë[ßúÖ¼ÿË_ş’ O½ğ~ô£yËF“ÿâ¿8½ë]ïŠ¤.ÿjW»ZºÖµ®•®p…+t¥G58óÌ3#Úå›ü'>ñ‰é_øBWºÈf›m–°u_úÒ—–4Ç©û¬³Îš“¾	C€ÓN;-õB ¤õÄOìÛW<õøãŸ3HÙ(ôş÷¿?½ñoŒhå_ìbK{ï½w%‡úşüç?'ÏA’7lØäW€3?ä…+]éJ3¡î”ˆàxÈ!‡te\îr—Kx`‚4ıë_“ºO9å”ôÇ?ş1í¾ûî]°÷¹Ï}Rrtiˆñ‹_Ìi—áædlJ@›x5ÊP²”MEæx?şñ“Õ_fÄ>úèô¢½hÎàş^şò—§?ıéO•PxĞA%ÂëE/zÑ²Š*L›yÛÛŞV…ãç&7¹Iúá˜vŞyç.$Ê9§5kÖ¤ıöÛ/a+/yÉKÒç>÷¹„%EÙ¥ö'† øÃ$¨wà„”×Ó#n’¿óïD´Ë·¢~ÿûßw¥Õ#ê7™%•!ù~øáéw¸C¼+-ì¹çéÑ~tºä%/Ù•'B1‰¥<qƒÜ ©ûú×¿>FGzõ«_îw¿û¥‹\ä"p£Î˜XÈe¯}ÿûßï•\¥áııV¹•T6üsÌ1•_f¿ìe/K·½ímË¤…¿úÕ¯¦’ªá÷oxÃÒu®sÕ7BA d¼ß$ÿä'?I'œpÂœşC†“2#ç\Fê¡ş®Ä"rğÁ§³Ï>»“BE{ÊSÒ‰/4€·øÃî*NS¸ï}ïÛ•6m‘‰  Ë>ƒq•«\%­]»6¢	{ xu6”c+Ø­<¤+^ñŠUØO?AR}ûÛßÖq°Ë\æ2øB„FÈå/~ñ‹W†ª^rBÀLƒ?øío[IÁ1 Ûm·]b‰8ÉÛDF<|äÙ8â—ºÔ¥*‹İu¯{İHJd„&© W ³Ì‚ô«O½¥Lsó›ß<m³Í6²¦ÚMğÉ’L¯]»6İıîwOåjÙ¸qãœûò—¿Ü¥çCœÛİîvé†7¼a¶Ÿ Èò¹˜tNÂøb|VH,*ê¸Å-nÑhC˜iğÇ ©.ÅßúÖ·N[o½ue ‰A1 ,~®#}™~mµŸ€É¯»ròå1ÈŒJßÆÔôáIúó={ì@ıúùÏŞişm#„QÅŠŒŒ_ÿú×]›;V/á0ò‘ÿ{ÜãU´ $}BY•Yü0ÀÑtãß¸Œ.*¼”u/ªaó;°€™Ühş½ÕÌ.Ùæ›oîz×»FrÂ¯K¸o~ó›	òÀ]îr—Î®Y³&A¤È#+0ÇF¼õ›G`ìÀPƒOG“ğï-¶Ø¢Šb9_¨Ö}ãß¨ÒÉuëßıïÿ1†‰*à™»„m&ØşÏ3cG€:·êst¬àÚ×¾v§ÉAÊM&
+fûí·hµ‡¯l$°ö•ÚB¤·şÜ+äwÑRÉ÷ër ÿßÿş7‘°„(Gò¿Şõ®ÑJ{°GßI˜	ôÚhšIîúoR»€aX`Ñ±+°•—|
+†GÉwºÓ"š"{À§>õ©Nš@IşÅ9:øá±ãq>ÊÁ‡õ#ß±´ª[Æ§5<V0ùåJ¦+Û…+‡a&çY–@etğ£<èAØc3(Ëc—½ìe+gGÅ©"›~Pœgë–d’êê›ô…¸’’)ÒÕŸ/}ÚÜX 4ÿˆµk×&«^8ëÙÕ¯~õˆ¦|àÕ¡ÑH¸ıío_Ù">Ş!‹ˆ÷i¨NÀØŞıú×¿ÑEù K‹J˜œm\E|Üş Ï µ¥ §¤~~éP”!Ò¨~´€ˆ³ı×‘F{şšuP˜ë%¢%‹çDĞ0+•zéÜ@r@€µk×ª²r6œ:)Û^eôùaJVwuõ)²è¬±!€Cr£ÅHy)¹GºÉ­ORä)Ckˆxé+WN€¼º h…:y,/œw»‰´^>Cİ=r¥*ûãè˜½ü²,êå¤o™Ö+L^qÂˆ*«nB.y©ì¨ÓÆ† xr)u#Ç:Ü«C¥Pæï°Ã©Ÿ‰µNQl}5 m—õ:ôÖ·¾µç‘lˆ»Ï>ûTG×8à€N1Ú‰ NÂLÀ‰áòà‡ƒ!{ÜãÒg>ó™ïØ¸Z¿~ıœÉÆJŞL•Kş?6°ZJrX€ê½„%¯ü?øÁ•Êñºïàq¤³Ú8«xå+_™l×Šs&ÊDä™—wÙe—d…£8X9ıôÓv9¥L ƒ8X¦)÷ =(Qq×­[—ñˆG$Â¨v`I¤{~YÆ‰ zİeş(ÃcC€ú¤<ç%ò²S„Àº^OÈ»ãïX‚Í	_óš×L[Í˜•#Oµ‡ñğï|ç;§w¿ûİÉ‰Hã£eèCJ4–:ò€	÷‚¼ A–ˆ‡o‚ëH O]ØÁÇ?şñê¼ƒgI¯;OQœúşFnTñ±!@¹¢a7¡©©›Ïì<ö±íÊŞm·İÒšBÈëÊÜ±Ê°MÑjëØÀG<üœsÚu×]“#\Vc¤ÏçC$eyík_ÛuÀ3Êš@ğÑ~4Ù©Œôù|gŸóœçTOŸö´§¥œ{/ùê6³a,ğE€R¯®n¤—î!yHuØ#ç\‘Íç=ïyó
+ÄzüãßYÙÈ<^Ö[†ÉVº}+— Wæ‹ÓH¼¨A­£É|ğƒ¬ä®Îy¶ÍlŸøÄ'ª·}êÛÎö/{¨’Uì8¦îài½¾¥Œ¼ç€#±øm¿YIoûÛ«7v¬¦ùà£.dÙË%Şôş »Aäõòñ[e<ÃyÚ@8qû€«G›zÕÑ”fUC|/ˆP5£^>)ßxlØ°¡z/P;šê&}XØ±!€†9ú¬Ã@ñ¥p9çdeyó–ŸóxHéRôeuÆÑ¡öÃ@‹ Ã×Šƒ^–€/ßô¦7­„Âœó‚|j–ÓÉ+nF‡ìĞ²D Â!ÃÒ}í·QS‡¯`•D–%0øŒb~XúFQÏr®cY" 	õIOzR*—6éş1!kfGe~V^=»Zıe‰ Œ*Ï|æ3Ó{Şó.çEÌÒÌÜ\‡‰¸òêY)¿Ğ~,KXhgÛrsG E€¹c²ªRZXUÓ=·³+˜çv¹9å?øAõ~bÎ9ÙÃg¿w0ÃUo¶£sµ9ØË¿÷½ï]í&ºf®¹ÆéÏYQ`2¸öa7XlR9Š®<d°oA“°éòìåñ‹_¬Şhv˜¸ôåèV8 ÒkÿĞ‰qà3`M8­¢~Z'òÃwLì¥/}iÏ#_3ÍşŠB€I´+eËÛA&Õ…<·E€FÍáægÇËÈl	åÙCçş\7@U#Yl…-Ì3‚O}êS“‹©]íĞ)34‹¢3…eQo2/GY E€rká×¼æ5É†Q¯³}÷¼ç=““ÃQÄQnZCÄ—‹¿¢ ß;õ	rŞÏYÿH¿ÍmnS]áÚ¤I8€Zluä}>1MáßŠB ¯ƒy%+Æy˜3|&°$áö	ú•w L<k¹ú+
+¨€&r¹NÆ$Ú½¢`¸ÜŸÙ"ÀrŸÁE¶¿E€Eà¤Šê¹-Œj$—i=+¼•³Uñ¢è|óCô©–€cô±ëñºOØ,µ†zşr‰¯(°Ÿsî¼#˜øó¡a9¦´ğˆ©YQpâ‰'Nå Os£–%¸®Å¬/{–Î›¸1ØŒB¯zÕ«ª/t–0>ì°ÃFº…‹]ô3E»¦Í_v€ïz·ŸŞ6léÊ[Â½k’Ëü2ìõó£>zdóaÇĞ½#«pL-;`oÅ7õÔãü¦q¶ë×”'İd—ïò» j9š†—¸Ò—¹¬8±PçF/ïüGyõ=à¨¢î2À*ªHÃ½ ;…N¹Î¿rÎĞ£KuMË€E¸`™_¨ó}>“®>Î„:ô¡>§{¨Òû9·80êV’å¸úõmY"€†·n4#° p,Ê}6H(é7ç\½¢mïÜ¼ïğMÛZ–r†B —ùº¦ûí\Úä&NRy4`åø~f§vª¾üù­?}#0˜d/S:ãb£A»ášw/hº”yĞ2-ÜxG`^pÕ¡‹Ä[o!ÊÕí„ ×©õ„ÜÂá®zÙ6>#ĞXÓœ€-¯TgíÚ{ï½³+IÜ·ü¨A®maK‡0nàŸnºüy:†`u·¢/¸Ú”ºCä¢Ç7&ŸXoº·Ï ¾ÅK`hqÙ²«Y£Ö_Ø,U©F°ú8à€ÎssÎÉÊï¾ŞN™ Ål&ØşOé4"€/nøhS´Ûõ®î´xë¯ŒhD 'lO>ùäN/	x×€  
+pIDATø'a	Ç¾P¿Un÷İwOÔP–º~ö‚'¡5çœ\çóq™ÅÎİ¿9ÏÚ,¢Nw×ës6À5³Şö)ß6®Ã•qí²`Ü;Œz–yõ°gêv™ól{Ümd?Aÿ±Íz™zü“Ÿüduå=Û‹]OT?üğDMÏy¶N˜­æ#ùHjjS#Ô¸Ôñ¸¹›}¡~œïz‹ê½|ÛÁMíq-½W·å»
+ÎÄ›l¯x\¥sQç6Ûl“\d"Å]$íë¤o~ó›Ïë¼èŠ{TòáxÏ‡X&Ë3õ‡Ëƒ@ú¿å–[&pÑ¦€	ßa‚·2l/Xµ‰÷1ŒRM§¾³Õì¼óÎÕG)ŒMÔ~#X-å+QV	?
+Ò?ôĞC“W­9asä‘G&r­£WšIŒ<B¬Šx/ß†«Ú­"/zúNaÀ½ï}ïK^;x/ß3}vÆdÈG©P3ápÚàıÂ=÷Ü3’}õ€s5=ŠVÔN“é>ç>ƒˆ÷òÁ@Îú‡»ÀV'İ>*2Úoõì0¾OÂ¹dA§Ër>a%±3`?e3ócó˜®K—ù	»aÜ`{–K¦£ß°Š"ŞË7á¥ªì›^X¹ï¾û&ç"ïû®Í7Ñ|qéá9ääÛÊGÚb|p`p¨Ò–hÎ¹óLß¾ñY$Š©Ïòpá|ìÀú&©S°!Àn`ß@ÃDX€ï}ìcKì&ÆÊÛX0Vğ Î(|ËÏê1 ¨Ù{ìÑ)êkdqq$RŠ'GæÁ\}|"âuùG9"İõ2v#Z±Dœï­cr–6/>ª®”µöÛo¿T’ue›œ9ñ¡*ã©^“sU}Œ›EÍ2[–o¤ €ì[Â¥szÖãYûï¿…Ù°›Ó`'v4ÆÃ;î¸²hWØ¤šàH´Ú7ÎØêŸu'è`Nü€	xGÀæc•qı‹U¦.å	`¬›dò‡39Ï";$Üa‡€UÎêÖß*Rûœ9’ñ÷²,„{Ç;ŞQÎÆ×F¤•,VêÃÆBøds‘f! p?ç£¨•±DÚqÇÓ±Ç›œ~"Ø–µR__P5	&€‡uXõ²†t
+SåùP~—VwòœŒÕeRPŠ:\ÄQ1fèí¶Û.’æøÄ„La¨Š¸g`/}‚&ÄŒ4ˆ
+¹"ÁHç7A&+çYd‹ôÒ×^5Ò°˜’çGzø¾vòú×¿>iw¤•¾y4õÉÓ ¨Tå:sÉ*”7ˆ3I6’¬”^}å‡$‘h2•0ÂØ„ıüĞ‡š¨IG-Ââ\ıhø%.q	ÉC;“›Á¢ d%}G<|Š6`zÔ£"«ò}j»‘obëãgPıP*Ò=a±DõƒQ§¨°0§AÙÄ‡qó"@Tf¥˜ «YÒ p¤`ıùÏ>1Cš(ÇG	êdÌ7÷Bº60/%ôÀè­·Ş:é”#`¾0ò°‡=,AÄr`lFÕ_şÀÿ<s±2ZÍQ
+À¼q¾öÓû…9”ûW
+úhÌ:è dQøTyŠğçtáËÅFÉ8Q‡±À"N£°0"¾`è÷æ^‡(`˜‹i
+Î”eâ²ÑÔƒB'ˆíµ×^Éª";Ô5°á¬"I[ˆ´Qú9Ï~ø)çYR±È'å3HÔŒ:‘Fx,‘ßJÕÏÈ§‡Û£Á?|¢®\ÉWú¸g=ëYÕ›2}Tá‘ @½1¤i«µ\®P±9°4Âı|˜oå d„£:ªÒËQGÎ³Ô¯…æ1®Pé¢<6HŒ,“Ş‰±M–¦ï5#à2B¡–dZªS§*Qfş’ €†!mƒŞÔi5ƒ¥“M2¾‰2pl‡åŒÊ¹ıöÛ'uc³”ĞÉòÏÀÏMŒ8–‡µ	sØ¶!Üä×ùg<ãéÀLê¢Å t¬‚4"»zä#™˜ÃChªoéK† øT?ì/;‡ô³¾YQVµI&ICŒÅtkra1uøì[´B²,ªL@;Î¹›]Hãh+(˜0‡ìÓé}§˜yÖ$3å¼8*QÕ¿·d@'eÜˆF9,Zê½x[Î³7(VTÀÊ·“·Ğ:éõHs”?ì°Ã‡ViØvñğ! ~Fò`ïç“‡ı_ÂöD «—Ñ€ı?x\Yh¾0²Mš·bvİºu©\Ûn»mb,’o%±7ó,*$RÉ˜¤pêŠğ(|«ˆºUo Ò°‰¦UHÒ8Â-öñù|ó@#Øu×]+¤xò“1øbüàT¯İ0|Ùy¿~¤¼şpÂÙúõëS©1@0–°¤wRs¤A€6$´&ßæÃS1Y¶¯nohªc˜têJ $µSgÄQ˜A¤•Ï²x½ı¼¾„é6ìX"ÖyÙ™†ñÅøsÀª%tE¥¶éBÎu>Òë¾ÓãíÔ1fD>wŸ}öIì‘ÆÏ9'öpú¯8¨IMÏ2ÑlåÑ`*3G!äÅ³´#ÂØCLp¤•¾²Ô¸Hƒ8ê"2şDzéÓ˜ Óz™¾á9À(Ãš•ó,öPA£Ö1ÒØ„¡Ñíéâ°¿#ÌU&œJÇxéÛßg7€$‘NWö, ä“úçPÉOg³ÉW•¬%êµoLŒM½^…MÔÓË8íÅáÚ2Íkhÿ6¦»ì²K‚HúÈ,nã-àÉOŞfø(ı9 r+Œ/\:ª
+R„4±ÌpL˜1)OàCì³ç|!2E~øù7™‘Æ·ÊJ¬Ö´ºÁ<J£<ø¥vtq¬ |	«§•ù¦Í'Èiá3]S›UŒJúy|Èàp®C-â£v= çœœ¤±+¥ãÃ<ÔÄ o¤z<>çæÉWoÎ9Ù–µ#WJÌòšœÍ:4á(çæú™PQ’¦z†IgácÁ+ËX¹H|™Ö&$ÒPDÑW¦ÖFs™^Ï—_‡/ã=  ğcoÊÂL¤i®“[¥HØG‘`0=ˆzñ	$l¤ÏfùÏ b7Ú‚"Ô·ŒãVxFER#o±¾	×†œsbõ³«7LÚÅÒçpSH¶§-˜¨#E,Dì½ÆÑX/å´#ÂâÃº¾ ²œs²C3Àß©„Áp„FönÂ"uˆ, ÜBœrÁşzùÏ`W°©-97¯zåÁ“”©iGSíÓìNoU7ÁöKgüAa	»v4c,?şøÄ&Bf ÓT¤¶ñ¦ÜbÚ¡şy PëVî´°rçv µ0Ğ0­\ VîÜÔ³¦•Ô"ÀÊÛzÖ"À@Ã´rZ˜’¹T3Z˜ÔÈOÉs[˜’‰˜T3Z˜ÔÈOÉs[˜’‰˜T3Z˜ÔÈOÉs[˜’‰˜T3Z˜ÔÈOÉs[˜ğDLúñÿ  ÿÿõA¡   IDAT XJÓ¶¸cn    IEND®B`‚
+./main/resources/pack.mcmeta
+{
+  "pack": {
+    "pack_format": 34,
+    "description": "MCC In Server resources"
+  }
+}

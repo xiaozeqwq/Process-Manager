@@ -1,0 +1,157 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'net.neoforged.moddev' version '2.0.142'
+    id 'com.gradleup.shadow' version '9.6.1'      // 兼容 Gradle 9.4.1
+    id 'idea'
+}
+
+tasks.named('wrapper', Wrapper).configure {
+    distributionType = Wrapper.DistributionType.BIN
+}
+
+version = mod_version
+group = mod_group_id
+
+sourceSets.main.resources {
+    srcDir('src/generated/resources')
+    exclude("**/*.bbmodel")
+    exclude("src/generated/**/.cache")
+}
+
+base {
+    archivesName = mod_id
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+neoForge {
+    version = project.neo_version
+
+    parchment {
+        mappingsVersion = project.parchment_mappings_version
+        minecraftVersion = project.parchment_minecraft_version
+    }
+
+    runs {
+        client {
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        server {
+            server()
+            programArgument '--nogui'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        gameTestServer {
+            type = "gameTestServer"
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        data {
+            data()
+            programArguments.addAll '--mod', project.mod_id, '--all', '--output', file('src/generated/resources/').getAbsolutePath(), '--existing', file('src/main/resources/').getAbsolutePath()
+        }
+        configureEach {
+            systemProperty 'forge.logging.markers', 'REGISTRIES'
+            logLevel = org.slf4j.event.Level.DEBUG
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+configurations {
+    runtimeClasspath.extendsFrom localRuntime
+}
+
+dependencies {
+    // 需要打包并重命名的库
+    shadow 'com.moandjiezana.toml:toml4j:0.7.2'
+    shadow 'org.apache.commons:commons-compress:1.26.0'
+    shadow 'commons-codec:commons-codec:1.16.0'   // 必须与 NeoForge 内置版本一致
+    // 以下传递依赖也会被自动包含，显式声明只是为了锁定版本（可选）
+    // shadow 'org.apache.commons:commons-lang3:3.14.0'
+    // shadow 'commons-io:commons-io:2.16.1'
+    // shadow 'com.google.code.gson:gson:2.10.1'   // 如果直接依赖了 Gson
+}
+
+// ==================== Shadow 配置 ====================
+shadowJar {
+    archiveClassifier = ''                     // 直接替换原始 JAR
+    configurations = [project.configurations.shadow]
+
+    // 重命名包，彻底避免与 NeoForge / Minecraft 内置库冲突
+    relocate 'org.apache.commons.compress', 'com.xiaoze_qwq_.mis.shadow.compress'
+    relocate 'org.apache.commons.codec',   'com.xiaoze_qwq_.mis.shadow.codec'
+    relocate 'org.apache.commons.lang3',   'com.xiaoze_qwq_.mis.shadow.lang3'
+    relocate 'org.apache.commons.io',      'com.xiaoze_qwq_.mis.shadow.io'
+
+    // Google Gson（Minecraft 内置了此库，必须 relocate 全部子包）
+    relocate 'com.google.gson',            'com.xiaoze_qwq_.mis.shadow.gson'
+
+    relocate 'com.moandjiezana.toml',      'com.xiaoze_qwq_.mis.shadow.toml'
+
+    // 排除签名文件
+    exclude 'META-INF/*.SF'
+    exclude 'META-INF/*.DSA'
+    exclude 'META-INF/*.RSA'
+
+    // 合并服务描述文件
+    mergeServiceFiles()
+}
+
+// 让 assemble 依赖 shadowJar，因此执行 gradlew build 即可获得最终 JAR
+tasks.named('assemble').configure {
+    dependsOn shadowJar
+}
+
+// 禁用普通 jar
+tasks.named('jar').configure {
+    enabled = false
+}
+
+// ==================== 资源替换 ====================
+var replaceProperties = [
+        minecraft_version      : minecraft_version,
+        minecraft_version_range: minecraft_version_range,
+        loader_version_range   : loader_version_range,
+        mod_id                 : mod_id,
+        mod_name               : mod_name,
+        mod_license            : mod_license,
+        mod_version            : mod_version
+]
+
+processResources {
+    inputs.properties replaceProperties
+    filesMatching("META-INF/neoforge.mods.toml") {
+        expand replaceProperties
+    }
+}
+
+publishing {
+    publications {
+        register('mavenJava', MavenPublication) {
+            from components.java
+        }
+    }
+    repositories {
+        maven {
+            url "file://${project.projectDir}/repo"
+        }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+idea {
+    module {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}
