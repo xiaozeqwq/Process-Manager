@@ -33,7 +33,7 @@ public record ImmersiveInputPacket(String instanceId, String command) implements
         ctx.enqueueWork(() -> {
             if (ctx.player() instanceof ServerPlayer player) {
                 MCCInstance inst = MCCManager.getInstance().getInstance(msg.instanceId);
-                if (inst != null && inst.isSubscribed(player)) {
+                if (inst != null && inst.isSubscribed(player) && inst.isImmersiveInputAllowed(player)) {
                     // 仅使用密码模式检查输入权限
                     if (MISSessionManager.getInstance().isInMISMode(player)) {
                         inst.sendCommand(msg.command);

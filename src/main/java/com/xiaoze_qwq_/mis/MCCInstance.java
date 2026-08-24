@@ -39,7 +39,7 @@ public class MCCInstance {
     private MISConfig.InstanceConfig config;
     private final Logger LOGGER = MCCInServer.LOGGER;
     private final RingBuffer<LogEntry> outputRing;
-    private final Set<ServerPlayer> immersiveSubscribers = ConcurrentHashMap.newKeySet();
+    private final Map<ServerPlayer, Boolean> immersiveSubscribers = new ConcurrentHashMap<>();
     private final Set<ServerPlayer> statusSubscribers = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean restartScheduled = new AtomicBoolean(false);
@@ -58,8 +58,6 @@ public class MCCInstance {
     private final AtomicBoolean immersiveConsole = new AtomicBoolean(false);
     private final AtomicInteger consoleLastPrintedIndex = new AtomicInteger(0);
 
-    private final org.apache.logging.log4j.Logger ALONE_LOGGER;
-
     // 当前操作状态
     private volatile OperationState operationState = OperationState.IDLE;
 
@@ -73,29 +71,6 @@ public class MCCInstance {
             t.setDaemon(true);
             return t;
         });
-        this.ALONE_LOGGER = createAloneLogger();
-    }
-
-    private org.apache.logging.log4j.Logger createAloneLogger() {
-        org.apache.logging.log4j.core.LoggerContext ctx =
-                (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false);
-        org.apache.logging.log4j.core.config.Configuration cfg = ctx.getConfiguration();
-        org.apache.logging.log4j.core.layout.PatternLayout layout =
-                org.apache.logging.log4j.core.layout.PatternLayout.newBuilder().withPattern("%m%n").build();
-        org.apache.logging.log4j.core.appender.ConsoleAppender appender =
-                org.apache.logging.log4j.core.appender.ConsoleAppender.newBuilder()
-                        .setName("MISAloneConsole-" + instanceId)
-                        .setLayout(layout)
-                        .setTarget(org.apache.logging.log4j.core.appender.ConsoleAppender.Target.SYSTEM_OUT)
-                        .build();
-        appender.start();
-        org.apache.logging.log4j.core.config.LoggerConfig loggerConfig =
-                new org.apache.logging.log4j.core.config.LoggerConfig("MISAloneLogger-" + instanceId,
-                        org.apache.logging.log4j.Level.INFO, false);
-        loggerConfig.addAppender(appender, org.apache.logging.log4j.Level.INFO, null);
-        cfg.addLogger("MISAloneLogger-" + instanceId, loggerConfig);
-        ctx.updateLoggers();
-        return org.apache.logging.log4j.LogManager.getLogger("MISAloneLogger-" + instanceId);
     }
 
     // ==================== 操作状态控制 ====================
@@ -261,6 +236,7 @@ public class MCCInstance {
     }
 
     private void handleProcessExit(int exitCode) {
+        cleanupAfterExit();
         if (exitCode == config.exitCode) {
             LOGGER.info("[{}] Expected exit code, not restarting.", instanceId);
             closeLogger();
@@ -274,6 +250,28 @@ public class MCCInstance {
             closeLogger();
             sendInstanceRemovedPacket();
         }
+    }
+
+    private void cleanupAfterExit() {
+        if (processInputStream != null) {
+            try { processInputStream.close(); } catch (IOException ignored) {}
+            processInputStream = null;
+        }
+        if (outputReaderExecutor != null) {
+            outputReaderExecutor.shutdownNow();
+            outputReaderExecutor = null;
+        }
+        if (statusMonitor != null) {
+            statusMonitor.stop();
+            statusMonitor = null;
+        }
+        if (processWriter != null) {
+            try { processWriter.close(); } catch (IOException ignored) {}
+            processWriter = null;
+        }
+        mccProcess = null;
+        waitForExitThread = null;
+        currentPid.set(-1);
     }
 
     private void sendInstanceRemovedPacket() {
@@ -303,13 +301,13 @@ public class MCCInstance {
     public void stop(boolean sendExit) {
         if (!startOperation(sendExit ? OperationState.STOPPING : OperationState.FORCE_STOPPING)) return;
         try {
-            stopInternal(sendExit);
+            stopInternal(sendExit, true);
         } finally {
             endOperation();
         }
     }
 
-    private void stopInternal(boolean sendExit) {
+    private void stopInternal(boolean sendExit, boolean broadcastRemoved) {
         processLock.writeLock().lock();
         try {
             if (!running.get() && mccProcess == null) return;
@@ -362,7 +360,7 @@ public class MCCInstance {
             currentPid.set(-1);
             closeLogger();
             if (statusMonitor != null) statusMonitor.stop();
-            sendInstanceRemovedPacket();
+            if (broadcastRemoved) sendInstanceRemovedPacket();
         } finally {
             processLock.writeLock().unlock();
         }
@@ -373,7 +371,7 @@ public class MCCInstance {
         CompletableFuture.runAsync(() -> {
             try {
                 LOGGER.info("[{}] Restarting instance...", instanceId);
-                stopInternal(true);
+                stopInternal(true, false);
                 try { Thread.sleep(500); } catch (InterruptedException ignored) {}
                 startInternal();
                 LOGGER.info("[{}] Restart sequence completed for instance", instanceId);
@@ -404,8 +402,8 @@ public class MCCInstance {
 
     // ==================== 输出订阅 ====================
     public void addImmersiveSubscriber(ServerPlayer player, boolean canInput) {
-        immersiveSubscribers.add(player);
-        List<LogEntry> history = outputRing.getLast(outputRing.size());
+        immersiveSubscribers.put(player, canInput);
+        List<LogEntry> history = outputRing.getLast(Math.min(200, outputRing.size()));
         for (LogEntry entry : history) {
             MCCInServer.sendToPlayer(player, new MCCOutputPacket(instanceId, entry.message));
         }
@@ -418,7 +416,11 @@ public class MCCInstance {
     }
 
     public boolean isSubscribed(ServerPlayer player) {
-        return immersiveSubscribers.contains(player);
+        return immersiveSubscribers.containsKey(player);
+    }
+
+    public boolean isImmersiveInputAllowed(ServerPlayer player) {
+        return Boolean.TRUE.equals(immersiveSubscribers.get(player));
     }
 
     public void addStatusSubscriber(ServerPlayer player) {
@@ -456,7 +458,7 @@ public class MCCInstance {
         if (immersiveSubscribers.isEmpty()) return;
         MCCOutputPacket pkt = new MCCOutputPacket(instanceId, raw);
         MCCInServer.executeOnServerThread(() -> {
-            for (ServerPlayer player : List.copyOf(immersiveSubscribers)) {
+            for (ServerPlayer player : List.copyOf(immersiveSubscribers.keySet())) {
                 if (player.isRemoved()) immersiveSubscribers.remove(player);
                 else PacketDistributor.sendToPlayer(player, pkt);
             }
@@ -483,18 +485,13 @@ public class MCCInstance {
     }
 
     private void printToConsole(String message, long timestamp) {
-        boolean alone = config.outputAlone;
         StringBuilder sb = new StringBuilder();
-        if (alone) {
-            if (config.outputWithTime) {
-                String time = new SimpleDateFormat(config.outputTimeFormat).format(new Date(timestamp));
-                sb.append('[').append(time).append("] ");
-            }
-            sb.append('[').append(instanceId).append("] ").append(message);
-            ALONE_LOGGER.info(sb.toString());
-        } else {
-            System.out.println("[" + instanceId + "] " + message);
+        if (config.outputAlone && config.outputWithTime) {
+            String time = new SimpleDateFormat(config.outputTimeFormat).format(new Date(timestamp));
+            sb.append('[').append(time).append("] ");
         }
+        sb.append('[').append(instanceId).append("] ").append(message);
+        System.out.println(sb);
     }
 
     // ==================== 工具方法 ====================
@@ -510,7 +507,7 @@ public class MCCInstance {
     public StatusMonitor getStatusMonitor() { return statusMonitor; }
     public ScheduledExecutorService getScheduler() { return scheduler; }
     public void removeDisconnectedPlayer(UUID uuid) {
-        immersiveSubscribers.removeIf(p -> p.getUUID().equals(uuid));
+        immersiveSubscribers.keySet().removeIf(p -> p.getUUID().equals(uuid));
         statusSubscribers.removeIf(p -> p.getUUID().equals(uuid));
     }
 
@@ -521,5 +518,12 @@ public class MCCInstance {
     public void updateConfig(MISConfig.InstanceConfig newConfig) {
         this.config = newConfig;
         resizeBuffer(newConfig.historyLimit);
+        if (outputLogger != null) {
+            outputLogger.closeAndFinalize();
+        }
+        outputLogger = new MCCOutputLogger(Paths.get(newConfig.logDirectory), newConfig);
+        if (running.get()) {
+            outputLogger.startNewLog();
+        }
     }
 }

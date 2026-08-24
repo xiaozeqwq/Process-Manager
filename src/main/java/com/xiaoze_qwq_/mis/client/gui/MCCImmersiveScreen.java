@@ -25,6 +25,7 @@ public class MCCImmersiveScreen extends Screen {
     private int textAreaTop, textAreaBottom;
     private int lineHeight;
     private boolean isDraggingScrollbar = false;
+    private boolean initialized = false;
 
     private List<String> availableInstances = new ArrayList<>();
 
@@ -38,8 +39,10 @@ public class MCCImmersiveScreen extends Screen {
 
     public static void addLine(String instanceId, Component line) {
         List<Component> lines = instanceLines.computeIfAbsent(instanceId, k -> Collections.synchronizedList(new ArrayList<>()));
-        lines.add(line);
-        while (lines.size() > MAX_LINES) lines.remove(0);
+        synchronized (lines) {
+            lines.add(line);
+            while (lines.size() > MAX_LINES) lines.remove(0);
+        }
         Minecraft mc = Minecraft.getInstance();
         if (mc.screen instanceof MCCImmersiveScreen screen && screen.currentInstanceId.equals(instanceId)) {
             screen.updateScrollIfAtBottom();
@@ -112,6 +115,8 @@ public class MCCImmersiveScreen extends Screen {
         textAreaTop = 10;
         int inputAreaHeight = canInput ? 30 : 10;
         textAreaBottom = this.height - 40 - inputAreaHeight;
+        lineHeight = this.font.lineHeight + 2;
+        initialized = true;
         int leftMargin = 10, rightMargin = this.width - 10;
 
         gui.fill(leftMargin - 2, textAreaTop - 2, rightMargin + 2, textAreaTop - 1, 0xFFAAAAAA);
@@ -120,16 +125,23 @@ public class MCCImmersiveScreen extends Screen {
         gui.fill(rightMargin + 1, textAreaTop - 2, rightMargin + 2, textAreaBottom + 2, 0xFFAAAAAA);
 
         List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
-        int y = textAreaTop;
         int visibleLines = (textAreaBottom - textAreaTop) / lineHeight;
-        int totalLines = lines.size();
-        int maxScroll = Math.max(0, totalLines - visibleLines);
-        scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
-        int start = Math.max(0, totalLines - visibleLines - scrollOffset);
-        int end = Math.min(totalLines, start + visibleLines + 1);
+        int totalLines;
+        int maxScroll;
+        int start, end;
+        List<Component> toDraw;
+        synchronized (lines) {
+            totalLines = lines.size();
+            maxScroll = Math.max(0, totalLines - visibleLines);
+            scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
+            start = Math.max(0, totalLines - visibleLines - scrollOffset);
+            end = Math.min(totalLines, start + visibleLines + 1);
+            toDraw = new ArrayList<>(lines.subList(start, end));
+        }
 
-        for (int i = start; i < end; i++) {
-            gui.drawString(this.font, lines.get(i), leftMargin, y, 0xFFFFFF, false);
+        int y = textAreaTop;
+        for (Component c : toDraw) {
+            gui.drawString(this.font, c, leftMargin, y, 0xFFFFFF, false);
             y += lineHeight;
         }
 
@@ -142,11 +154,6 @@ public class MCCImmersiveScreen extends Screen {
             barPos = Math.max(0, Math.min(barPos, trackHeight - barHeight));
             gui.fill(barX, textAreaTop, barX + barWidth, textAreaBottom, 0x44000000);
             gui.fill(barX, textAreaTop + barPos, barX + barWidth, textAreaTop + barPos + barHeight, 0xFFAAAAAA);
-            if (isDraggingScrollbar) {
-                float percent = (float)(mouseY - textAreaTop) / (trackHeight - barHeight);
-                scrollOffset = (int)(percent * maxScroll);
-                scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
-            }
         }
 
         if (canInput) {
@@ -155,10 +162,12 @@ public class MCCImmersiveScreen extends Screen {
     }
 
     private void updateScrollIfAtBottom() {
+        if (!initialized) return;
         if (isAtBottom()) scrollToBottom();
     }
 
     private boolean isAtBottom() {
+        if (!initialized) return true;
         List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
         int visible = (textAreaBottom - textAreaTop) / lineHeight;
         if (visible <= 0) return true;
@@ -167,9 +176,61 @@ public class MCCImmersiveScreen extends Screen {
     }
 
     private void scrollToBottom() {
+        if (!initialized) return;
         List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
         int visible = (textAreaBottom - textAreaTop) / lineHeight;
         scrollOffset = Math.max(0, lines.size() - visible);
+    }
+
+    @Override
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (button == 0 && isOverScrollbar(mouseX, mouseY)) {
+            isDraggingScrollbar = true;
+            updateScrollFromMouseY(mouseY);
+            return true;
+        }
+        return super.mouseClicked(mouseX, mouseY, button);
+    }
+
+    @Override
+    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+        if (button == 0) isDraggingScrollbar = false;
+        return super.mouseReleased(mouseX, mouseY, button);
+    }
+
+    @Override
+    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
+        if (isDraggingScrollbar) {
+            updateScrollFromMouseY(mouseY);
+            return true;
+        }
+        return super.mouseDragged(mouseX, mouseY, button, dragX, dragY);
+    }
+
+    private boolean isOverScrollbar(double mouseX, double mouseY) {
+        if (!initialized || textAreaBottom <= textAreaTop) return false;
+        List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
+        int visible = (textAreaBottom - textAreaTop) / lineHeight;
+        if (visible <= 0 || lines.size() <= visible) return false;
+        int barWidth = 8;
+        int barX = this.width - barWidth - 4;
+        return mouseX >= barX && mouseX <= barX + barWidth && mouseY >= textAreaTop && mouseY <= textAreaBottom;
+    }
+
+    private void updateScrollFromMouseY(double mouseY) {
+        if (!initialized || textAreaBottom <= textAreaTop) return;
+        List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
+        int visible = (textAreaBottom - textAreaTop) / lineHeight;
+        int totalLines = lines.size();
+        if (visible <= 0 || totalLines <= visible) return;
+        int maxScroll = Math.max(0, totalLines - visible);
+        int trackHeight = textAreaBottom - textAreaTop;
+        int barHeight = Math.max(20, (int)((float)visible / totalLines * trackHeight));
+        double usable = trackHeight - barHeight;
+        if (usable <= 0) return;
+        double percent = Math.max(0, Math.min(1, (mouseY - textAreaTop) / usable));
+        scrollOffset = (int)(percent * maxScroll);
+        scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
     }
 
     @Override

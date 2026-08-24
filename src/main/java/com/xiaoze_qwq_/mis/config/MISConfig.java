@@ -1,6 +1,7 @@
 package com.xiaoze_qwq_.mis.config;
 
 import com.moandjiezana.toml.Toml;
+import com.moandjiezana.toml.TomlWriter;
 import com.xiaoze_qwq_.mis.MCCInServer;
 import net.neoforged.fml.loading.FMLPaths;
 
@@ -220,6 +221,7 @@ public class MISConfig {
             instances.clear();
             List<Toml> instanceTables = toml.getTables("instances");
             if (instanceTables != null) {
+                ensureDefaultConfig();
                 for (Toml instToml : instanceTables) {
                     String id = instToml.getString("id", "");
                     if (id.isEmpty()) continue;
@@ -294,8 +296,8 @@ public class MISConfig {
         cfg.startupDelaySeconds = table.getLong("startupDelaySeconds", 0L).intValue();
         cfg.workingDirectory = table.getString("workingDirectory", "");
         cfg.executablePath = table.getString("executablePath", "MCC/MinecraftClient");
-        cfg.arguments = table.getList("arguments", new ArrayList<>());
-        cfg.environment = table.getTable("environment") != null ? toStringMap(table.getTable("environment")) : new HashMap<>();
+        cfg.arguments = parseArguments(table);
+        cfg.environment = parseEnvironment(table);
         cfg.autoRestart = table.getBoolean("autoRestart", true);
         cfg.exitCode = table.getLong("exitCode", 0L).intValue();
         cfg.statusRefreshSeconds = table.getLong("statusRefreshSeconds", 2L).intValue();
@@ -315,23 +317,81 @@ public class MISConfig {
         return cfg;
     }
 
+    private static void ensureDefaultConfig() {
+        if (defaultConfig == null) {
+            defaultConfig = new InstanceConfig();
+        }
+    }
+
     private static void mergeWithDefault(InstanceConfig cfg) {
-        if (cfg.name == null || cfg.name.isEmpty()) cfg.name = defaultConfig.name.isEmpty() ? cfg.id : defaultConfig.name;
-        if (cfg.executablePath == null || cfg.executablePath.isEmpty()) cfg.executablePath = defaultConfig.executablePath;
-        if (cfg.arguments.isEmpty() && !defaultConfig.arguments.isEmpty()) cfg.arguments = defaultConfig.arguments;
-        if (cfg.environment.isEmpty() && !defaultConfig.environment.isEmpty()) cfg.environment = defaultConfig.environment;
-        if (cfg.workingDirectory.isEmpty()) cfg.workingDirectory = defaultConfig.workingDirectory;
-        if (cfg.logDirectory.isEmpty()) cfg.logDirectory = defaultConfig.logDirectory.isEmpty() ? "MCC-Output" : defaultConfig.logDirectory;
-        if (cfg.statusRefreshSeconds <= 0) cfg.statusRefreshSeconds = defaultConfig.statusRefreshSeconds;
-        if (cfg.historyLimit <= 0) cfg.historyLimit = defaultConfig.historyLimit;
-        if (cfg.exitCode < 0) cfg.exitCode = defaultConfig.exitCode;
-        if (cfg.maxArchives <= 0) cfg.maxArchives = defaultConfig.maxArchives;
+        ensureDefaultConfig();
+        InstanceConfig defaults = defaultConfig;
+        if (defaults == null) return;
+        if (cfg.name == null || cfg.name.isEmpty()) cfg.name = defaults.name.isEmpty() ? cfg.id : defaults.name;
+        if (cfg.executablePath == null || cfg.executablePath.isEmpty()) cfg.executablePath = defaults.executablePath;
+        if (cfg.arguments.isEmpty() && !defaults.arguments.isEmpty()) cfg.arguments = defaults.arguments;
+        if (cfg.environment.isEmpty() && !defaults.environment.isEmpty()) cfg.environment = defaults.environment;
+        if (cfg.workingDirectory.isEmpty()) cfg.workingDirectory = defaults.workingDirectory;
+        if (cfg.logDirectory.isEmpty()) cfg.logDirectory = defaults.logDirectory.isEmpty() ? "MCC-Output" : defaults.logDirectory;
+        if (cfg.statusRefreshSeconds <= 0) cfg.statusRefreshSeconds = defaults.statusRefreshSeconds;
+        if (cfg.historyLimit <= 0) cfg.historyLimit = defaults.historyLimit;
+        if (cfg.exitCode < 0) cfg.exitCode = defaults.exitCode;
+        if (cfg.maxArchives <= 0) cfg.maxArchives = defaults.maxArchives;
     }
 
     private static Map<String, String> toStringMap(Toml table) {
         Map<String, String> map = new HashMap<>();
         table.toMap().forEach((k, v) -> map.put(k, v.toString()));
         return map;
+    }
+
+    private static String formatStringArray(List<String> args) {
+        TomlWriter writer = new TomlWriter();
+        String serialized = writer.write(Collections.singletonMap("arguments", args));
+        int idx = serialized.indexOf('=');
+        return idx >= 0 ? serialized.substring(idx + 1).trim() : "[]";
+    }
+
+    private static String formatInlineTable(Map<String, String> env) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<String, String> entry : env.entrySet()) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append('"').append(escapeTomlString(entry.getKey()))
+                    .append("\" = \"")
+                    .append(escapeTomlString(entry.getValue()))
+                    .append('"');
+        }
+        sb.append('}');
+        return sb.toString();
+    }
+
+    private static String escapeTomlString(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
+    }
+
+    private static List<String> parseArguments(Toml table) {
+        List<?> list = table.getList("arguments");
+        if (list != null) {
+            List<String> result = new ArrayList<>(list.size());
+            for (Object o : list) result.add(String.valueOf(o));
+            return result;
+        }
+        String str = table.getString("arguments");
+        if (str == null || str.isEmpty()) return new ArrayList<>();
+        return new ArrayList<>(Arrays.asList(str.split(",")));
+    }
+
+    private static Map<String, String> parseEnvironment(Toml table) {
+        Object envObj = table.toMap().get("environment");
+        if (envObj instanceof Map<?, ?>) {
+            Map<String, String> map = new HashMap<>();
+            ((Map<?, ?>) envObj).forEach((k, v) -> map.put(String.valueOf(k), String.valueOf(v)));
+            return map;
+        }
+        return new HashMap<>();
     }
 
     private static void saveToml() {
@@ -360,8 +420,8 @@ public class MISConfig {
         writer.write("startupDelaySeconds = " + cfg.startupDelaySeconds + "\n");
         writer.write("workingDirectory = \"" + cfg.workingDirectory + "\"\n");
         writer.write("executablePath = \"" + cfg.executablePath + "\"\n");
-        writer.write("arguments = " + cfg.arguments.toString() + "\n");
-        writer.write("environment = " + cfg.environment.toString() + "\n");
+        writer.write("arguments = " + formatStringArray(cfg.arguments) + "\n");
+        writer.write("environment = " + formatInlineTable(cfg.environment) + "\n");
         writer.write("autoRestart = " + cfg.autoRestart + "\n");
         writer.write("exitCode = " + cfg.exitCode + "\n");
         writer.write("statusRefreshSeconds = " + cfg.statusRefreshSeconds + "\n");

@@ -359,7 +359,8 @@ public class MISCommand {
         }
     }
 
-    private static int executeReload(CommandContext<CommandSourceStack> ctx) {
+    private static int executeReload(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        if (!checkPermission(ctx.getSource(), "mis.reload")) return errorNoPermission(ctx);
         MCCManager.getInstance().reloadInstances();
         ctx.getSource().sendSuccess(() -> Component.translatable("mis.reload.success"), false);
         return 1;

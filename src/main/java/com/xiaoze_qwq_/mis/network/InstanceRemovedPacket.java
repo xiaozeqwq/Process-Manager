@@ -2,6 +2,7 @@ package com.xiaoze_qwq_.mis.network;
 
 import com.xiaoze_qwq_.mis.MCCInServer;
 import com.xiaoze_qwq_.mis.client.gui.MCCImmersiveScreen;
+import com.xiaoze_qwq_.mis.client.gui.StatusScreen;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.ByteBufCodecs;
@@ -29,6 +30,9 @@ public record InstanceRemovedPacket(String instanceId) implements CustomPacketPa
         ctx.enqueueWork(() -> {
             Minecraft.getInstance().execute(() -> {
                 MCCImmersiveScreen.clearInstanceLines(msg.instanceId);
+                if (Minecraft.getInstance().screen instanceof StatusScreen screen && screen.getInstanceId().equals(msg.instanceId)) {
+                    screen.onClose();
+                }
             });
         });
     }

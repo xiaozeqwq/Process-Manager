@@ -72,6 +72,7 @@ public class MCCImmersiveScreen extends Screen {
     private int textAreaTop, textAreaBottom;
     private int lineHeight;
     private boolean isDraggingScrollbar = false;
+    private boolean initialized = false;
 
     private List<String> availableInstances = new ArrayList<>();
 
@@ -85,8 +86,10 @@ public class MCCImmersiveScreen extends Screen {
 
     public static void addLine(String instanceId, Component line) {
         List<Component> lines = instanceLines.computeIfAbsent(instanceId, k -> Collections.synchronizedList(new ArrayList<>()));
-        lines.add(line);
-        while (lines.size() > MAX_LINES) lines.remove(0);
+        synchronized (lines) {
+            lines.add(line);
+            while (lines.size() > MAX_LINES) lines.remove(0);
+        }
         Minecraft mc = Minecraft.getInstance();
         if (mc.screen instanceof MCCImmersiveScreen screen && screen.currentInstanceId.equals(instanceId)) {
             screen.updateScrollIfAtBottom();
@@ -159,6 +162,8 @@ public class MCCImmersiveScreen extends Screen {
         textAreaTop = 10;
         int inputAreaHeight = canInput ? 30 : 10;
         textAreaBottom = this.height - 40 - inputAreaHeight;
+        lineHeight = this.font.lineHeight + 2;
+        initialized = true;
         int leftMargin = 10, rightMargin = this.width - 10;
 
         gui.fill(leftMargin - 2, textAreaTop - 2, rightMargin + 2, textAreaTop - 1, 0xFFAAAAAA);
@@ -167,16 +172,23 @@ public class MCCImmersiveScreen extends Screen {
         gui.fill(rightMargin + 1, textAreaTop - 2, rightMargin + 2, textAreaBottom + 2, 0xFFAAAAAA);
 
         List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
-        int y = textAreaTop;
         int visibleLines = (textAreaBottom - textAreaTop) / lineHeight;
-        int totalLines = lines.size();
-        int maxScroll = Math.max(0, totalLines - visibleLines);
-        scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
-        int start = Math.max(0, totalLines - visibleLines - scrollOffset);
-        int end = Math.min(totalLines, start + visibleLines + 1);
+        int totalLines;
+        int maxScroll;
+        int start, end;
+        List<Component> toDraw;
+        synchronized (lines) {
+            totalLines = lines.size();
+            maxScroll = Math.max(0, totalLines - visibleLines);
+            scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
+            start = Math.max(0, totalLines - visibleLines - scrollOffset);
+            end = Math.min(totalLines, start + visibleLines + 1);
+            toDraw = new ArrayList<>(lines.subList(start, end));
+        }
 
-        for (int i = start; i < end; i++) {
-            gui.drawString(this.font, lines.get(i), leftMargin, y, 0xFFFFFF, false);
+        int y = textAreaTop;
+        for (Component c : toDraw) {
+            gui.drawString(this.font, c, leftMargin, y, 0xFFFFFF, false);
             y += lineHeight;
         }
 
@@ -189,11 +201,6 @@ public class MCCImmersiveScreen extends Screen {
             barPos = Math.max(0, Math.min(barPos, trackHeight - barHeight));
             gui.fill(barX, textAreaTop, barX + barWidth, textAreaBottom, 0x44000000);
             gui.fill(barX, textAreaTop + barPos, barX + barWidth, textAreaTop + barPos + barHeight, 0xFFAAAAAA);
-            if (isDraggingScrollbar) {
-                float percent = (float)(mouseY - textAreaTop) / (trackHeight - barHeight);
-                scrollOffset = (int)(percent * maxScroll);
-                scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
-            }
         }
 
         if (canInput) {
@@ -202,10 +209,12 @@ public class MCCImmersiveScreen extends Screen {
     }
 
     private void updateScrollIfAtBottom() {
+        if (!initialized) return;
         if (isAtBottom()) scrollToBottom();
     }
 
     private boolean isAtBottom() {
+        if (!initialized) return true;
         List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
         int visible = (textAreaBottom - textAreaTop) / lineHeight;
         if (visible <= 0) return true;
@@ -214,9 +223,61 @@ public class MCCImmersiveScreen extends Screen {
     }
 
     private void scrollToBottom() {
+        if (!initialized) return;
         List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
         int visible = (textAreaBottom - textAreaTop) / lineHeight;
         scrollOffset = Math.max(0, lines.size() - visible);
+    }
+
+    @Override
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (button == 0 && isOverScrollbar(mouseX, mouseY)) {
+            isDraggingScrollbar = true;
+            updateScrollFromMouseY(mouseY);
+            return true;
+        }
+        return super.mouseClicked(mouseX, mouseY, button);
+    }
+
+    @Override
+    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+        if (button == 0) isDraggingScrollbar = false;
+        return super.mouseReleased(mouseX, mouseY, button);
+    }
+
+    @Override
+    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
+        if (isDraggingScrollbar) {
+            updateScrollFromMouseY(mouseY);
+            return true;
+        }
+        return super.mouseDragged(mouseX, mouseY, button, dragX, dragY);
+    }
+
+    private boolean isOverScrollbar(double mouseX, double mouseY) {
+        if (!initialized || textAreaBottom <= textAreaTop) return false;
+        List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
+        int visible = (textAreaBottom - textAreaTop) / lineHeight;
+        if (visible <= 0 || lines.size() <= visible) return false;
+        int barWidth = 8;
+        int barX = this.width - barWidth - 4;
+        return mouseX >= barX && mouseX <= barX + barWidth && mouseY >= textAreaTop && mouseY <= textAreaBottom;
+    }
+
+    private void updateScrollFromMouseY(double mouseY) {
+        if (!initialized || textAreaBottom <= textAreaTop) return;
+        List<Component> lines = instanceLines.getOrDefault(currentInstanceId, Collections.emptyList());
+        int visible = (textAreaBottom - textAreaTop) / lineHeight;
+        int totalLines = lines.size();
+        if (visible <= 0 || totalLines <= visible) return;
+        int maxScroll = Math.max(0, totalLines - visible);
+        int trackHeight = textAreaBottom - textAreaTop;
+        int barHeight = Math.max(20, (int)((float)visible / totalLines * trackHeight));
+        double usable = trackHeight - barHeight;
+        if (usable <= 0) return;
+        double percent = Math.max(0, Math.min(1, (mouseY - textAreaTop) / usable));
+        scrollOffset = (int)(percent * maxScroll);
+        scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
     }
 
     @Override
@@ -1014,7 +1075,8 @@ public class MISCommand {
         }
     }
 
-    private static int executeReload(CommandContext<CommandSourceStack> ctx) {
+    private static int executeReload(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        if (!checkPermission(ctx.getSource(), "mis.reload")) return errorNoPermission(ctx);
         MCCManager.getInstance().reloadInstances();
         ctx.getSource().sendSuccess(() -> Component.translatable("mis.reload.success"), false);
         return 1;
@@ -1186,6 +1248,7 @@ public class MISCommand {
 package com.xiaoze_qwq_.mis.config;
 
 import com.moandjiezana.toml.Toml;
+import com.moandjiezana.toml.TomlWriter;
 import com.xiaoze_qwq_.mis.MCCInServer;
 import net.neoforged.fml.loading.FMLPaths;
 
@@ -1405,6 +1468,7 @@ public class MISConfig {
             instances.clear();
             List<Toml> instanceTables = toml.getTables("instances");
             if (instanceTables != null) {
+                ensureDefaultConfig();
                 for (Toml instToml : instanceTables) {
                     String id = instToml.getString("id", "");
                     if (id.isEmpty()) continue;
@@ -1479,8 +1543,8 @@ public class MISConfig {
         cfg.startupDelaySeconds = table.getLong("startupDelaySeconds", 0L).intValue();
         cfg.workingDirectory = table.getString("workingDirectory", "");
         cfg.executablePath = table.getString("executablePath", "MCC/MinecraftClient");
-        cfg.arguments = table.getList("arguments", new ArrayList<>());
-        cfg.environment = table.getTable("environment") != null ? toStringMap(table.getTable("environment")) : new HashMap<>();
+        cfg.arguments = parseArguments(table);
+        cfg.environment = parseEnvironment(table);
         cfg.autoRestart = table.getBoolean("autoRestart", true);
         cfg.exitCode = table.getLong("exitCode", 0L).intValue();
         cfg.statusRefreshSeconds = table.getLong("statusRefreshSeconds", 2L).intValue();
@@ -1500,23 +1564,81 @@ public class MISConfig {
         return cfg;
     }
 
+    private static void ensureDefaultConfig() {
+        if (defaultConfig == null) {
+            defaultConfig = new InstanceConfig();
+        }
+    }
+
     private static void mergeWithDefault(InstanceConfig cfg) {
-        if (cfg.name == null || cfg.name.isEmpty()) cfg.name = defaultConfig.name.isEmpty() ? cfg.id : defaultConfig.name;
-        if (cfg.executablePath == null || cfg.executablePath.isEmpty()) cfg.executablePath = defaultConfig.executablePath;
-        if (cfg.arguments.isEmpty() && !defaultConfig.arguments.isEmpty()) cfg.arguments = defaultConfig.arguments;
-        if (cfg.environment.isEmpty() && !defaultConfig.environment.isEmpty()) cfg.environment = defaultConfig.environment;
-        if (cfg.workingDirectory.isEmpty()) cfg.workingDirectory = defaultConfig.workingDirectory;
-        if (cfg.logDirectory.isEmpty()) cfg.logDirectory = defaultConfig.logDirectory.isEmpty() ? "MCC-Output" : defaultConfig.logDirectory;
-        if (cfg.statusRefreshSeconds <= 0) cfg.statusRefreshSeconds = defaultConfig.statusRefreshSeconds;
-        if (cfg.historyLimit <= 0) cfg.historyLimit = defaultConfig.historyLimit;
-        if (cfg.exitCode < 0) cfg.exitCode = defaultConfig.exitCode;
-        if (cfg.maxArchives <= 0) cfg.maxArchives = defaultConfig.maxArchives;
+        ensureDefaultConfig();
+        InstanceConfig defaults = defaultConfig;
+        if (defaults == null) return;
+        if (cfg.name == null || cfg.name.isEmpty()) cfg.name = defaults.name.isEmpty() ? cfg.id : defaults.name;
+        if (cfg.executablePath == null || cfg.executablePath.isEmpty()) cfg.executablePath = defaults.executablePath;
+        if (cfg.arguments.isEmpty() && !defaults.arguments.isEmpty()) cfg.arguments = defaults.arguments;
+        if (cfg.environment.isEmpty() && !defaults.environment.isEmpty()) cfg.environment = defaults.environment;
+        if (cfg.workingDirectory.isEmpty()) cfg.workingDirectory = defaults.workingDirectory;
+        if (cfg.logDirectory.isEmpty()) cfg.logDirectory = defaults.logDirectory.isEmpty() ? "MCC-Output" : defaults.logDirectory;
+        if (cfg.statusRefreshSeconds <= 0) cfg.statusRefreshSeconds = defaults.statusRefreshSeconds;
+        if (cfg.historyLimit <= 0) cfg.historyLimit = defaults.historyLimit;
+        if (cfg.exitCode < 0) cfg.exitCode = defaults.exitCode;
+        if (cfg.maxArchives <= 0) cfg.maxArchives = defaults.maxArchives;
     }
 
     private static Map<String, String> toStringMap(Toml table) {
         Map<String, String> map = new HashMap<>();
         table.toMap().forEach((k, v) -> map.put(k, v.toString()));
         return map;
+    }
+
+    private static String formatStringArray(List<String> args) {
+        TomlWriter writer = new TomlWriter();
+        String serialized = writer.write(Collections.singletonMap("arguments", args));
+        int idx = serialized.indexOf('=');
+        return idx >= 0 ? serialized.substring(idx + 1).trim() : "[]";
+    }
+
+    private static String formatInlineTable(Map<String, String> env) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<String, String> entry : env.entrySet()) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append('"').append(escapeTomlString(entry.getKey()))
+                    .append("\" = \"")
+                    .append(escapeTomlString(entry.getValue()))
+                    .append('"');
+        }
+        sb.append('}');
+        return sb.toString();
+    }
+
+    private static String escapeTomlString(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
+    }
+
+    private static List<String> parseArguments(Toml table) {
+        List<?> list = table.getList("arguments");
+        if (list != null) {
+            List<String> result = new ArrayList<>(list.size());
+            for (Object o : list) result.add(String.valueOf(o));
+            return result;
+        }
+        String str = table.getString("arguments");
+        if (str == null || str.isEmpty()) return new ArrayList<>();
+        return new ArrayList<>(Arrays.asList(str.split(",")));
+    }
+
+    private static Map<String, String> parseEnvironment(Toml table) {
+        Object envObj = table.toMap().get("environment");
+        if (envObj instanceof Map<?, ?>) {
+            Map<String, String> map = new HashMap<>();
+            ((Map<?, ?>) envObj).forEach((k, v) -> map.put(String.valueOf(k), String.valueOf(v)));
+            return map;
+        }
+        return new HashMap<>();
     }
 
     private static void saveToml() {
@@ -1545,8 +1667,8 @@ public class MISConfig {
         writer.write("startupDelaySeconds = " + cfg.startupDelaySeconds + "\n");
         writer.write("workingDirectory = \"" + cfg.workingDirectory + "\"\n");
         writer.write("executablePath = \"" + cfg.executablePath + "\"\n");
-        writer.write("arguments = " + cfg.arguments.toString() + "\n");
-        writer.write("environment = " + cfg.environment.toString() + "\n");
+        writer.write("arguments = " + formatStringArray(cfg.arguments) + "\n");
+        writer.write("environment = " + formatInlineTable(cfg.environment) + "\n");
         writer.write("autoRestart = " + cfg.autoRestart + "\n");
         writer.write("exitCode = " + cfg.exitCode + "\n");
         writer.write("statusRefreshSeconds = " + cfg.statusRefreshSeconds + "\n");
@@ -1992,7 +2114,7 @@ public record ImmersiveInputPacket(String instanceId, String command) implements
         ctx.enqueueWork(() -> {
             if (ctx.player() instanceof ServerPlayer player) {
                 MCCInstance inst = MCCManager.getInstance().getInstance(msg.instanceId);
-                if (inst != null && inst.isSubscribed(player)) {
+                if (inst != null && inst.isSubscribed(player) && inst.isImmersiveInputAllowed(player)) {
                     // 仅使用密码模式检查输入权限
                     if (MISSessionManager.getInstance().isInMISMode(player)) {
                         inst.sendCommand(msg.command);
@@ -2034,6 +2156,7 @@ package com.xiaoze_qwq_.mis.network;
 
 import com.xiaoze_qwq_.mis.MCCInServer;
 import com.xiaoze_qwq_.mis.client.gui.MCCImmersiveScreen;
+import com.xiaoze_qwq_.mis.client.gui.StatusScreen;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.ByteBufCodecs;
@@ -2061,6 +2184,9 @@ public record InstanceRemovedPacket(String instanceId) implements CustomPacketPa
         ctx.enqueueWork(() -> {
             Minecraft.getInstance().execute(() -> {
                 MCCImmersiveScreen.clearInstanceLines(msg.instanceId);
+                if (Minecraft.getInstance().screen instanceof StatusScreen screen && screen.getInstanceId().equals(msg.instanceId)) {
+                    screen.onClose();
+                }
             });
         });
     }
@@ -2193,6 +2319,7 @@ package com.xiaoze_qwq_.mis.network;
 
 import com.xiaoze_qwq_.mis.MCCInServer;
 import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.ByteBufCodecs;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
@@ -2205,37 +2332,45 @@ public record StatusDataPacket(String instanceId, boolean mccRunning, String mcc
     public static final CustomPacketPayload.Type<StatusDataPacket> TYPE =
             new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(MCCInServer.MOD_ID, "status_data"));
 
-    public static final StreamCodec<RegistryFriendlyByteBuf, StatusDataPacket> STREAM_CODEC =
-            StreamCodec.of(
-                    (buf, packet) -> {
-                        buf.writeUtf(packet.instanceId);
-                        buf.writeBoolean(packet.mccRunning);
-                        buf.writeUtf(packet.mccUptime);
-                        buf.writeDouble(packet.cpuUsage);
-                        buf.writeLong(packet.memoryMB);
-                        buf.writeDouble(packet.downloadSpeedKBps);
-                        buf.writeDouble(packet.uploadSpeedKBps);
-                        buf.writeLong(packet.totalRxMB);
-                        buf.writeLong(packet.totalTxMB);
-                    },
-                    buf -> new StatusDataPacket(
-                            buf.readUtf(),
-                            buf.readBoolean(),
-                            buf.readUtf(),
-                            buf.readDouble(),
-                            buf.readLong(),
-                            buf.readDouble(),
-                            buf.readDouble(),
-                            buf.readLong(),
-                            buf.readLong()
-                    )
+    public record SubStats(long memoryMB, double downloadSpeedKBps, double uploadSpeedKBps,
+                           long totalRxMB, long totalTxMB) {
+    }
+
+    private static final StreamCodec<RegistryFriendlyByteBuf, SubStats> SUB_STATS_CODEC =
+            StreamCodec.composite(
+                    ByteBufCodecs.VAR_LONG, SubStats::memoryMB,
+                    ByteBufCodecs.DOUBLE, SubStats::downloadSpeedKBps,
+                    ByteBufCodecs.DOUBLE, SubStats::uploadSpeedKBps,
+                    ByteBufCodecs.VAR_LONG, SubStats::totalRxMB,
+                    ByteBufCodecs.VAR_LONG, SubStats::totalTxMB,
+                    SubStats::new
             );
+
+    public static final StreamCodec<RegistryFriendlyByteBuf, StatusDataPacket> STREAM_CODEC =
+            StreamCodec.composite(
+                    ByteBufCodecs.STRING_UTF8, StatusDataPacket::instanceId,
+                    ByteBufCodecs.BOOL, StatusDataPacket::mccRunning,
+                    ByteBufCodecs.STRING_UTF8, StatusDataPacket::mccUptime,
+                    ByteBufCodecs.DOUBLE, StatusDataPacket::cpuUsage,
+                    SUB_STATS_CODEC, StatusDataPacket::toSubStats,
+                    StatusDataPacket::new
+            );
+
+    private SubStats toSubStats() {
+        return new SubStats(memoryMB, downloadSpeedKBps, uploadSpeedKBps, totalRxMB, totalTxMB);
+    }
+
+    public StatusDataPacket(String instanceId, boolean mccRunning, String mccUptime, double cpuUsage, SubStats sub) {
+        this(instanceId, mccRunning, mccUptime, cpuUsage, sub.memoryMB(),
+                sub.downloadSpeedKBps(), sub.uploadSpeedKBps(), sub.totalRxMB(), sub.totalTxMB());
+    }
 
     @Override
     public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
         return TYPE;
     }
 }
+
 ./main/java/com/xiaoze_qwq_/mis/network/StatusRequestPacket.java
 package com.xiaoze_qwq_.mis.network;
 
@@ -2416,12 +2551,16 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @Mod(MCCInServer.MOD_ID)
 public class MCCInServer {
     public static final String MOD_ID = "mccinserver";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
     private static volatile MinecraftServer serverInstance;
+    private ScheduledExecutorService sessionPurger;
 
     public MCCInServer(IEventBus modEventBus) {
         modEventBus.addListener(this::registerPayloads);
@@ -2452,11 +2591,21 @@ public class MCCInServer {
         if (isLogCommandsEnabled()) {
             LOGGER.warn("server.properties log-commands is enabled. The /mis verify password will be written to the server log. Consider setting log-commands=false to avoid leaking passwords.");
         }
+        sessionPurger = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "MIS-SessionPurger");
+            t.setDaemon(true);
+            return t;
+        });
+        sessionPurger.scheduleAtFixedRate(MISSessionManager.getInstance()::purgeExpired, 10, 10, TimeUnit.MINUTES);
         MCCManager.getInstance().start();
     }
 
     @SubscribeEvent
     public void onServerStopping(ServerStoppingEvent event) {
+        if (sessionPurger != null) {
+            sessionPurger.shutdownNow();
+            sessionPurger = null;
+        }
         MCCManager.getInstance().stop();
     }
 
@@ -2569,7 +2718,7 @@ public class MCCInstance {
     private MISConfig.InstanceConfig config;
     private final Logger LOGGER = MCCInServer.LOGGER;
     private final RingBuffer<LogEntry> outputRing;
-    private final Set<ServerPlayer> immersiveSubscribers = ConcurrentHashMap.newKeySet();
+    private final Map<ServerPlayer, Boolean> immersiveSubscribers = new ConcurrentHashMap<>();
     private final Set<ServerPlayer> statusSubscribers = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean restartScheduled = new AtomicBoolean(false);
@@ -2588,8 +2737,6 @@ public class MCCInstance {
     private final AtomicBoolean immersiveConsole = new AtomicBoolean(false);
     private final AtomicInteger consoleLastPrintedIndex = new AtomicInteger(0);
 
-    private final org.apache.logging.log4j.Logger ALONE_LOGGER;
-
     // 当前操作状态
     private volatile OperationState operationState = OperationState.IDLE;
 
@@ -2603,29 +2750,6 @@ public class MCCInstance {
             t.setDaemon(true);
             return t;
         });
-        this.ALONE_LOGGER = createAloneLogger();
-    }
-
-    private org.apache.logging.log4j.Logger createAloneLogger() {
-        org.apache.logging.log4j.core.LoggerContext ctx =
-                (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false);
-        org.apache.logging.log4j.core.config.Configuration cfg = ctx.getConfiguration();
-        org.apache.logging.log4j.core.layout.PatternLayout layout =
-                org.apache.logging.log4j.core.layout.PatternLayout.newBuilder().withPattern("%m%n").build();
-        org.apache.logging.log4j.core.appender.ConsoleAppender appender =
-                org.apache.logging.log4j.core.appender.ConsoleAppender.newBuilder()
-                        .setName("MISAloneConsole-" + instanceId)
-                        .setLayout(layout)
-                        .setTarget(org.apache.logging.log4j.core.appender.ConsoleAppender.Target.SYSTEM_OUT)
-                        .build();
-        appender.start();
-        org.apache.logging.log4j.core.config.LoggerConfig loggerConfig =
-                new org.apache.logging.log4j.core.config.LoggerConfig("MISAloneLogger-" + instanceId,
-                        org.apache.logging.log4j.Level.INFO, false);
-        loggerConfig.addAppender(appender, org.apache.logging.log4j.Level.INFO, null);
-        cfg.addLogger("MISAloneLogger-" + instanceId, loggerConfig);
-        ctx.updateLoggers();
-        return org.apache.logging.log4j.LogManager.getLogger("MISAloneLogger-" + instanceId);
     }
 
     // ==================== 操作状态控制 ====================
@@ -2791,6 +2915,7 @@ public class MCCInstance {
     }
 
     private void handleProcessExit(int exitCode) {
+        cleanupAfterExit();
         if (exitCode == config.exitCode) {
             LOGGER.info("[{}] Expected exit code, not restarting.", instanceId);
             closeLogger();
@@ -2804,6 +2929,28 @@ public class MCCInstance {
             closeLogger();
             sendInstanceRemovedPacket();
         }
+    }
+
+    private void cleanupAfterExit() {
+        if (processInputStream != null) {
+            try { processInputStream.close(); } catch (IOException ignored) {}
+            processInputStream = null;
+        }
+        if (outputReaderExecutor != null) {
+            outputReaderExecutor.shutdownNow();
+            outputReaderExecutor = null;
+        }
+        if (statusMonitor != null) {
+            statusMonitor.stop();
+            statusMonitor = null;
+        }
+        if (processWriter != null) {
+            try { processWriter.close(); } catch (IOException ignored) {}
+            processWriter = null;
+        }
+        mccProcess = null;
+        waitForExitThread = null;
+        currentPid.set(-1);
     }
 
     private void sendInstanceRemovedPacket() {
@@ -2833,13 +2980,13 @@ public class MCCInstance {
     public void stop(boolean sendExit) {
         if (!startOperation(sendExit ? OperationState.STOPPING : OperationState.FORCE_STOPPING)) return;
         try {
-            stopInternal(sendExit);
+            stopInternal(sendExit, true);
         } finally {
             endOperation();
         }
     }
 
-    private void stopInternal(boolean sendExit) {
+    private void stopInternal(boolean sendExit, boolean broadcastRemoved) {
         processLock.writeLock().lock();
         try {
             if (!running.get() && mccProcess == null) return;
@@ -2892,7 +3039,7 @@ public class MCCInstance {
             currentPid.set(-1);
             closeLogger();
             if (statusMonitor != null) statusMonitor.stop();
-            sendInstanceRemovedPacket();
+            if (broadcastRemoved) sendInstanceRemovedPacket();
         } finally {
             processLock.writeLock().unlock();
         }
@@ -2903,7 +3050,7 @@ public class MCCInstance {
         CompletableFuture.runAsync(() -> {
             try {
                 LOGGER.info("[{}] Restarting instance...", instanceId);
-                stopInternal(true);
+                stopInternal(true, false);
                 try { Thread.sleep(500); } catch (InterruptedException ignored) {}
                 startInternal();
                 LOGGER.info("[{}] Restart sequence completed for instance", instanceId);
@@ -2934,8 +3081,8 @@ public class MCCInstance {
 
     // ==================== 输出订阅 ====================
     public void addImmersiveSubscriber(ServerPlayer player, boolean canInput) {
-        immersiveSubscribers.add(player);
-        List<LogEntry> history = outputRing.getLast(outputRing.size());
+        immersiveSubscribers.put(player, canInput);
+        List<LogEntry> history = outputRing.getLast(Math.min(200, outputRing.size()));
         for (LogEntry entry : history) {
             MCCInServer.sendToPlayer(player, new MCCOutputPacket(instanceId, entry.message));
         }
@@ -2948,7 +3095,11 @@ public class MCCInstance {
     }
 
     public boolean isSubscribed(ServerPlayer player) {
-        return immersiveSubscribers.contains(player);
+        return immersiveSubscribers.containsKey(player);
+    }
+
+    public boolean isImmersiveInputAllowed(ServerPlayer player) {
+        return Boolean.TRUE.equals(immersiveSubscribers.get(player));
     }
 
     public void addStatusSubscriber(ServerPlayer player) {
@@ -2986,7 +3137,7 @@ public class MCCInstance {
         if (immersiveSubscribers.isEmpty()) return;
         MCCOutputPacket pkt = new MCCOutputPacket(instanceId, raw);
         MCCInServer.executeOnServerThread(() -> {
-            for (ServerPlayer player : List.copyOf(immersiveSubscribers)) {
+            for (ServerPlayer player : List.copyOf(immersiveSubscribers.keySet())) {
                 if (player.isRemoved()) immersiveSubscribers.remove(player);
                 else PacketDistributor.sendToPlayer(player, pkt);
             }
@@ -3013,18 +3164,13 @@ public class MCCInstance {
     }
 
     private void printToConsole(String message, long timestamp) {
-        boolean alone = config.outputAlone;
         StringBuilder sb = new StringBuilder();
-        if (alone) {
-            if (config.outputWithTime) {
-                String time = new SimpleDateFormat(config.outputTimeFormat).format(new Date(timestamp));
-                sb.append('[').append(time).append("] ");
-            }
-            sb.append('[').append(instanceId).append("] ").append(message);
-            ALONE_LOGGER.info(sb.toString());
-        } else {
-            System.out.println("[" + instanceId + "] " + message);
+        if (config.outputAlone && config.outputWithTime) {
+            String time = new SimpleDateFormat(config.outputTimeFormat).format(new Date(timestamp));
+            sb.append('[').append(time).append("] ");
         }
+        sb.append('[').append(instanceId).append("] ").append(message);
+        System.out.println(sb);
     }
 
     // ==================== 工具方法 ====================
@@ -3040,7 +3186,7 @@ public class MCCInstance {
     public StatusMonitor getStatusMonitor() { return statusMonitor; }
     public ScheduledExecutorService getScheduler() { return scheduler; }
     public void removeDisconnectedPlayer(UUID uuid) {
-        immersiveSubscribers.removeIf(p -> p.getUUID().equals(uuid));
+        immersiveSubscribers.keySet().removeIf(p -> p.getUUID().equals(uuid));
         statusSubscribers.removeIf(p -> p.getUUID().equals(uuid));
     }
 
@@ -3051,6 +3197,13 @@ public class MCCInstance {
     public void updateConfig(MISConfig.InstanceConfig newConfig) {
         this.config = newConfig;
         resizeBuffer(newConfig.historyLimit);
+        if (outputLogger != null) {
+            outputLogger.closeAndFinalize();
+        }
+        outputLogger = new MCCOutputLogger(Paths.get(newConfig.logDirectory), newConfig);
+        if (running.get()) {
+            outputLogger.startNewLog();
+        }
     }
 }
 ./main/java/com/xiaoze_qwq_/mis/MCCManager.java

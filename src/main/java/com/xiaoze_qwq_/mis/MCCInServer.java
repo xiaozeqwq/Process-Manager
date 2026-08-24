@@ -24,12 +24,16 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @Mod(MCCInServer.MOD_ID)
 public class MCCInServer {
     public static final String MOD_ID = "mccinserver";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
     private static volatile MinecraftServer serverInstance;
+    private ScheduledExecutorService sessionPurger;
 
     public MCCInServer(IEventBus modEventBus) {
         modEventBus.addListener(this::registerPayloads);
@@ -60,11 +64,21 @@ public class MCCInServer {
         if (isLogCommandsEnabled()) {
             LOGGER.warn("server.properties log-commands is enabled. The /mis verify password will be written to the server log. Consider setting log-commands=false to avoid leaking passwords.");
         }
+        sessionPurger = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "MIS-SessionPurger");
+            t.setDaemon(true);
+            return t;
+        });
+        sessionPurger.scheduleAtFixedRate(MISSessionManager.getInstance()::purgeExpired, 10, 10, TimeUnit.MINUTES);
         MCCManager.getInstance().start();
     }
 
     @SubscribeEvent
     public void onServerStopping(ServerStoppingEvent event) {
+        if (sessionPurger != null) {
+            sessionPurger.shutdownNow();
+            sessionPurger = null;
+        }
         MCCManager.getInstance().stop();
     }
 
