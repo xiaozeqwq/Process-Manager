@@ -3,15 +3,23 @@ package com.xiaoze_qwq_.mis.client.gui;
 import java.util.LinkedList;
 
 /**
- * 图表数据追踪器，用于存储历史数据点（最多 60 个点）
+ * 图表数据追踪器，用于存储历史数据点（点数上限可配置，默认 60 个点）
  */
 public class ChartDataTracker {
-    private static final int MAX_POINTS = 60;
-    
+    private int maxPoints;
+
     private final LinkedList<Double> downloadSpeeds = new LinkedList<>();
     private final LinkedList<Double> uploadSpeeds = new LinkedList<>();
     private final LinkedList<Double> cpuUsages = new LinkedList<>();
     private final LinkedList<Double> memoryUsages = new LinkedList<>();
+
+    public ChartDataTracker() {
+        this(60);
+    }
+
+    public ChartDataTracker(int maxPoints) {
+        this.maxPoints = Math.max(10, maxPoints);
+    }
 
     /**
      * 添加一组新的数据点
@@ -29,9 +37,26 @@ public class ChartDataTracker {
 
     private void addToQueue(LinkedList<Double> queue, double value) {
         queue.add(value);
-        if (queue.size() > MAX_POINTS) {
+        while (queue.size() > maxPoints) {
             queue.removeFirst();
         }
+    }
+
+    /**
+     * 调整数据点容量（扩容或缩容），保留最新数据。
+     */
+    public synchronized void resize(int newCapacity) {
+        int cap = Math.max(10, newCapacity);
+        if (cap == maxPoints) return;
+        maxPoints = cap;
+        while (downloadSpeeds.size() > cap) downloadSpeeds.removeFirst();
+        while (uploadSpeeds.size() > cap) uploadSpeeds.removeFirst();
+        while (cpuUsages.size() > cap) cpuUsages.removeFirst();
+        while (memoryUsages.size() > cap) memoryUsages.removeFirst();
+    }
+
+    public synchronized int getMaxPoints() {
+        return maxPoints;
     }
 
     public synchronized LinkedList<Double> getDownloadSpeeds() { return new LinkedList<>(downloadSpeeds); }

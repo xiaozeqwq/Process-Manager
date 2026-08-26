@@ -30,6 +30,11 @@ public class MISNetwork {
                 ImmersiveExitPacket.STREAM_CODEC,
                 ImmersiveExitPacket::handle
         );
+        registrar.playToServer(
+                CookieAuthPacket.TYPE,
+                CookieAuthPacket.STREAM_CODEC,
+                CookieAuthPacket::handle
+        );
 
         // S2C 包：仅客户端环境注册，避免服务端加载 Screen/Minecraft 等客户端类
         if (FMLEnvironment.dist == Dist.CLIENT) {
@@ -62,6 +67,16 @@ public class MISNetwork {
                 InstanceRemovedPacket.TYPE,
                 InstanceRemovedPacket.STREAM_CODEC,
                 InstanceRemovedPacket::handleClient
+        );
+        registrar.playToClient(
+                CookieGrantPacket.TYPE,
+                CookieGrantPacket.STREAM_CODEC,
+                ClientPacketHandlers::handleCookieGrant
+        );
+        registrar.playToClient(
+                CookieAuthResultPacket.TYPE,
+                CookieAuthResultPacket.STREAM_CODEC,
+                ClientPacketHandlers::handleCookieAuthResult
         );
     }
 

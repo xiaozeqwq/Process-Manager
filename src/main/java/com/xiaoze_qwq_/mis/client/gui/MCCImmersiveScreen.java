@@ -92,6 +92,25 @@ public class MCCImmersiveScreen extends Screen {
             this.addRenderableWidget(inputField);
             this.setInitialFocus(inputField);
         }
+        computeLayout();
+        scrollToBottom();
+    }
+
+    /** 计算文本区布局（textAreaTop/Bottom、lineHeight），并标记布局已就绪 */
+    private void computeLayout() {
+        textAreaTop = 10;
+        int inputAreaHeight = canInput ? 30 : 10;
+        textAreaBottom = this.height - 40 - inputAreaHeight;
+        lineHeight = this.font.lineHeight + 2;
+        initialized = true;
+    }
+
+    /** 窗口尺寸变化时重新布局并滚动到底部 */
+    @Override
+    public void resize(Minecraft mc, int width, int height) {
+        super.resize(mc, width, height);
+        computeLayout();
+        scrollToBottom();
     }
 
     @Override
@@ -112,11 +131,7 @@ public class MCCImmersiveScreen extends Screen {
         this.renderBackground(gui, mouseX, mouseY, partialTick);
         super.render(gui, mouseX, mouseY, partialTick);
 
-        textAreaTop = 10;
-        int inputAreaHeight = canInput ? 30 : 10;
-        textAreaBottom = this.height - 40 - inputAreaHeight;
-        lineHeight = this.font.lineHeight + 2;
-        initialized = true;
+        computeLayout();
         int leftMargin = 10, rightMargin = this.width - 10;
 
         gui.fill(leftMargin - 2, textAreaTop - 2, rightMargin + 2, textAreaTop - 1, 0xFFAAAAAA);

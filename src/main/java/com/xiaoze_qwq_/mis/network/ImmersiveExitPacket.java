@@ -30,7 +30,7 @@ public record ImmersiveExitPacket(String instanceId) implements CustomPacketPayl
         ctx.enqueueWork(() -> {
             if (ctx.player() instanceof ServerPlayer player) {
                 MCCInstance inst = MCCManager.getInstance().getInstance(msg.instanceId);
-                if (inst != null) {
+                if (inst != null && inst.isSubscribed(player)) {
                     inst.removeImmersiveSubscriber(player);
                 }
             }

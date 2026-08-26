@@ -7,6 +7,7 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.xiaoze_qwq_.mis.*;
 import com.xiaoze_qwq_.mis.config.MISConfig;
+import com.xiaoze_qwq_.mis.network.CookieGrantPacket;
 import com.xiaoze_qwq_.mis.network.OpenStatusScreenPacket;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -31,8 +32,11 @@ public class MISCommand {
 
         base.then(Commands.literal("set")
                 .then(Commands.literal("password")
-                        .then(Commands.argument("password", StringArgumentType.word())
-                                .executes(MISCommand::executeSetPassword))));
+                        .then(Commands.argument("password", StringArgumentType.greedyString())
+                                .executes(MISCommand::executeSetPassword))
+                        .then(Commands.literal("confirm")
+                                .then(Commands.argument("password", StringArgumentType.greedyString())
+                                        .executes(MISCommand::executeSetPasswordConfirm)))));
 
         base.then(Commands.literal("unset")
                 .then(Commands.literal("password")
@@ -173,7 +177,17 @@ public class MISCommand {
             MCCInServer.executeOnServerThread(() -> {
                 if (ok) {
                     MISConfig.clearVerifyFailures(uuid);
-                    MISSessionManager.getInstance().grant(player, MISSessionManager.defaultDurationMs());
+                    MISSessionManager mgr = MISSessionManager.getInstance();
+                    mgr.grant(player, MISSessionManager.defaultDurationMs());
+                    // 撤销旧令牌（5 秒内仍可用旧令牌换新），并签发新令牌下发给客户端
+                    mgr.revokeCookiesFor(uuid);
+                    MISSessionManager.GrantedCookie granted = mgr.grantCookie(
+                            uuid,
+                            player.getGameProfile().getName(),
+                            MISSessionManager.serverAddressOf(player.getServer()),
+                            "",
+                            MISSessionManager.defaultDurationMs());
+                    MCCInServer.sendToPlayer(player, new CookieGrantPacket(granted.token(), granted.expiresAt()));
                     src.sendSuccess(() -> Component.translatable("mis.verify.success"), false);
                 } else {
                     MISConfig.recordVerifyFailure(uuid);
@@ -199,6 +213,30 @@ public class MISCommand {
         if (pwd.isEmpty()) {
             src.sendFailure(Component.translatable("mis.set.password.empty"));
             return 0;
+        }
+        if (MCCInServer.isLogCommandsEnabled()) {
+            src.sendFailure(Component.translatable("mis.set.password.log_commands_warning"));
+            return 0;
+        }
+        MISConfig.setPassword(pwd);
+        src.sendSuccess(() -> Component.translatable("mis.set.password.success"), false);
+        return 1;
+    }
+
+    private static int executeSetPasswordConfirm(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        if (!isConsole(src)) {
+            src.sendFailure(Component.translatable("mis.set.password.console_only"));
+            return 0;
+        }
+        String pwd = StringArgumentType.getString(ctx, "password");
+        if (pwd.isEmpty()) {
+            src.sendFailure(Component.translatable("mis.set.password.empty"));
+            return 0;
+        }
+        if (MCCInServer.isLogCommandsEnabled()) {
+            MCCInServer.LOGGER.warn("Password was set via /mis set password confirm while log-commands=true. "
+                    + "The password will be written to the server log. Consider setting log-commands=false.");
         }
         MISConfig.setPassword(pwd);
         src.sendSuccess(() -> Component.translatable("mis.set.password.success"), false);

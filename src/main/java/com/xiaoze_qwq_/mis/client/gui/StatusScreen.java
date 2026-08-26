@@ -1,5 +1,6 @@
 package com.xiaoze_qwq_.mis.client.gui;
 
+import com.xiaoze_qwq_.mis.config.MISConfig;
 import com.xiaoze_qwq_.mis.network.StatusDataPacket;
 import com.xiaoze_qwq_.mis.network.StatusRequestPacket;
 import net.minecraft.client.Minecraft;
@@ -13,8 +14,10 @@ import java.util.LinkedList;
 
 public class StatusScreen extends Screen {
     private static final int REFRESH_SECONDS = 2;
+    private static final int DEFAULT_CHART_MAX_POINTS = 60;
     private final String instanceId;
-    private final ChartDataTracker dataTracker = new ChartDataTracker();
+    private final ChartDataTracker dataTracker;
+    private int lastChartMaxPoints = DEFAULT_CHART_MAX_POINTS;
 
     private String mccUptime = "N/A";
     private boolean mccRunning = false;
@@ -36,6 +39,20 @@ public class StatusScreen extends Screen {
     public StatusScreen(String instanceId) {
         super(Component.translatable("mis.status.window_title"));
         this.instanceId = instanceId;
+        this.lastChartMaxPoints = readChartMaxPoints(instanceId);
+        this.dataTracker = new ChartDataTracker(lastChartMaxPoints);
+    }
+
+    /** 从实例配置读取图表点数上限，失败时回退到默认值 */
+    private static int readChartMaxPoints(String instanceId) {
+        try {
+            MISConfig.InstanceConfig cfg = MISConfig.getInstanceConfig(instanceId);
+            if (cfg != null && cfg.chartMaxPoints >= 10) {
+                return cfg.chartMaxPoints;
+            }
+        } catch (Throwable ignored) {
+        }
+        return DEFAULT_CHART_MAX_POINTS;
     }
 
     public String getInstanceId() {
@@ -67,6 +84,12 @@ public class StatusScreen extends Screen {
 
     @Override
     public void tick() {
+        // 配置更新时调整图表容量（保留最新数据）
+        int current = readChartMaxPoints(instanceId);
+        if (current != lastChartMaxPoints) {
+            lastChartMaxPoints = current;
+            dataTracker.resize(current);
+        }
         if (System.currentTimeMillis() - lastRequestTime >= REFRESH_SECONDS * 1000L)
             requestStatus();
     }

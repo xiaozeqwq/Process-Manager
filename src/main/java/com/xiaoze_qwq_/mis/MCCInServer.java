@@ -1,14 +1,17 @@
 package com.xiaoze_qwq_.mis;
 
+import com.xiaoze_qwq_.mis.client.ClientAutoLoginHandler;
 import com.xiaoze_qwq_.mis.command.MISCommand;
 import com.xiaoze_qwq_.mis.config.MISConfig;
 import com.xiaoze_qwq_.mis.network.*;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
@@ -39,6 +42,9 @@ public class MCCInServer {
         modEventBus.addListener(this::registerPayloads);
         modEventBus.addListener(MISNetwork::commonSetup);
         NeoForge.EVENT_BUS.register(this);
+        if (FMLEnvironment.dist == Dist.CLIENT) {
+            NeoForge.EVENT_BUS.register(ClientAutoLoginHandler.class);
+        }
     }
 
     private void registerPayloads(RegisterPayloadHandlersEvent event) {
@@ -98,7 +104,7 @@ public class MCCInServer {
         }
     }
 
-    private static boolean isLogCommandsEnabled() {
+    public static boolean isLogCommandsEnabled() {
         try {
             Path props = Paths.get("server.properties");
             if (Files.exists(props)) {

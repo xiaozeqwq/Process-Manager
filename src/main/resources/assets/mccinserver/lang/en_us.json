@@ -20,6 +20,7 @@
     "mis.set.password.success": "Password set.",
     "mis.set.password.console_only": "The password can only be set from the server console.",
     "mis.set.password.empty": "The password cannot be empty.",
+    "mis.set.password.log_commands_warning": "Cannot set password while log-commands=true. Use /mis set password confirm <password> from the console to proceed (the password will appear in the server log).",
     "mis.unset.password.success": "Password cleared. Players can no longer verify with /mis verify.",
     "mis.auth.console_only": "Auth management commands can only be used from the server console.",
     "mis.auth.list.none": "No authorization records found.",

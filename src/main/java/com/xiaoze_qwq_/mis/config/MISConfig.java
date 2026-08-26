@@ -10,6 +10,7 @@ import javax.crypto.spec.PBEKeySpec;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.nio.file.attribute.PosixFilePermission;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.*;
@@ -18,6 +19,9 @@ import java.util.concurrent.*;
 public class MISConfig {
     private static final Path CONFIG_PATH = FMLPaths.CONFIGDIR.get().resolve("mis_config.toml");
     private static final Path PASSWORD_FILE = FMLPaths.CONFIGDIR.get().resolve("mispassword");
+    // Cookie 令牌 HMAC 密钥文件，默认位于配置目录下的 mis_secret.key
+    private static final Path SECRET_KEY_FILE = FMLPaths.CONFIGDIR.get().resolve("mis_secret.key");
+    private static volatile byte[] secretKey;
 
     private static final String PBKDF2_ALGO = "PBKDF2WithHmacSHA512";
     private static final int PBKDF2_ITERATIONS = 120_000;
@@ -41,6 +45,60 @@ public class MISConfig {
 
     static {
         load();
+    }
+
+    // ==================== Cookie 令牌 HMAC 密钥 ====================
+    /**
+     * 获取用于 Cookie 令牌签名的 HMAC-SHA256 密钥。
+     * 若密钥文件不存在，使用 SecureRandom 生成 64 字节随机密钥，
+     * Base64 编码后写入 config/mis_secret.key，并将文件权限设置为 600。
+     * 该密钥仅用于 HMAC 签名，不用于加密。
+     */
+    public static byte[] getSecretKey() {
+        byte[] key = secretKey;
+        if (key != null && key.length > 0) return key;
+        synchronized (MISConfig.class) {
+            key = secretKey;
+            if (key != null && key.length > 0) return key;
+            loadOrCreateSecretKey();
+            return secretKey;
+        }
+    }
+
+    private static void loadOrCreateSecretKey() {
+        try {
+            if (Files.exists(SECRET_KEY_FILE)) {
+                String content = new String(Files.readAllBytes(SECRET_KEY_FILE), StandardCharsets.UTF_8).trim();
+                byte[] decoded = Base64.getDecoder().decode(content);
+                if (decoded.length > 0) {
+                    secretKey = decoded;
+                    return;
+                }
+            }
+            byte[] key = new byte[64];
+            RNG.nextBytes(key);
+            String encoded = Base64.getEncoder().encodeToString(key);
+            if (SECRET_KEY_FILE.getParent() != null) {
+                Files.createDirectories(SECRET_KEY_FILE.getParent());
+            }
+            Files.write(SECRET_KEY_FILE, encoded.getBytes(StandardCharsets.UTF_8));
+            setFilePermissions600(SECRET_KEY_FILE);
+            secretKey = key;
+            MCCInServer.LOGGER.info("Generated new MIS secret key at {}", SECRET_KEY_FILE);
+        } catch (Exception e) {
+            MCCInServer.LOGGER.error("Failed to load or create MIS secret key", e);
+            secretKey = new byte[0];
+        }
+    }
+
+    private static void setFilePermissions600(Path path) {
+        try {
+            Files.setPosixFilePermissions(path, EnumSet.of(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE));
+        } catch (UnsupportedOperationException | IOException e) {
+            // 文件系统不支持 POSIX 权限时忽略
+        }
     }
 
     // ==================== 密码管理（PBKDF2 + 随机盐） ====================
@@ -168,14 +226,14 @@ public class MISConfig {
         public int historyLimit = 2000;
         public String logDirectory = "MCC-Output";
         public String compressionFormat = "tar.gz";
-        public String compressionStrategy = "OLD";
-        public int scheduledCompressionMinutes = 60;
         public int maxArchives = 10;
         public boolean saveLogTime = true;
         public String timeFormat = "HH:mm:ss";
         public boolean outputAlone = false;
         public boolean outputWithTime = true;
         public String outputTimeFormat = "HH:mm:ss";
+        // 图表数据点数上限
+        public int chartMaxPoints = 60;
 
         public void mergeMissing(InstanceConfig defaults) {
             if (name.isEmpty() && defaults != null) name = defaults.name;
@@ -306,14 +364,21 @@ public class MISConfig {
         cfg.historyLimit = table.getLong("historyLimit", 2000L).intValue();
         cfg.logDirectory = table.getString("logDirectory", "");
         cfg.compressionFormat = table.getString("compressionFormat", "tar.gz");
-        cfg.compressionStrategy = table.getString("compressionStrategy", "OLD");
-        cfg.scheduledCompressionMinutes = table.getLong("scheduledCompressionMinutes", 60L).intValue();
         cfg.maxArchives = table.getLong("maxArchives", 10L).intValue();
         cfg.saveLogTime = table.getBoolean("saveLogTime", true);
         cfg.timeFormat = table.getString("timeFormat", "HH:mm:ss");
         cfg.outputAlone = table.getBoolean("outputAlone", false);
         cfg.outputWithTime = table.getBoolean("outputWithTime", true);
         cfg.outputTimeFormat = table.getString("outputTimeFormat", "HH:mm:ss");
+        cfg.chartMaxPoints = table.getLong("chartMaxPoints", 60L).intValue();
+        if (cfg.chartMaxPoints < 10) cfg.chartMaxPoints = 60;
+        // 已移除的字段：检测到旧配置时仅记录警告并忽略，不导致启动失败
+        if (table.getString("compressionStrategy") != null) {
+            MCCInServer.LOGGER.warn("Instance '{}' contains deprecated field 'compressionStrategy' which is ignored.", fallbackId);
+        }
+        if (table.getLong("scheduledCompressionMinutes") != null) {
+            MCCInServer.LOGGER.warn("Instance '{}' contains deprecated field 'scheduledCompressionMinutes' which is ignored.", fallbackId);
+        }
         return cfg;
     }
 
@@ -430,14 +495,13 @@ public class MISConfig {
         writer.write("historyLimit = " + cfg.historyLimit + "\n");
         writer.write("logDirectory = \"" + cfg.logDirectory + "\"\n");
         writer.write("compressionFormat = \"" + cfg.compressionFormat + "\"\n");
-        writer.write("compressionStrategy = \"" + cfg.compressionStrategy + "\"\n");
-        writer.write("scheduledCompressionMinutes = " + cfg.scheduledCompressionMinutes + "\n");
         writer.write("maxArchives = " + cfg.maxArchives + "\n");
         writer.write("saveLogTime = " + cfg.saveLogTime + "\n");
         writer.write("timeFormat = \"" + cfg.timeFormat + "\"\n");
         writer.write("outputAlone = " + cfg.outputAlone + "\n");
         writer.write("outputWithTime = " + cfg.outputWithTime + "\n");
         writer.write("outputTimeFormat = \"" + cfg.outputTimeFormat + "\"\n");
+        writer.write("chartMaxPoints = " + cfg.chartMaxPoints + "\n");
     }
 
     // ==================== 公共访问器 ====================

@@ -1,9 +1,11 @@
 package com.xiaoze_qwq_.mis.network;
 
+import com.xiaoze_qwq_.mis.client.ClientCookieStorage;
 import com.xiaoze_qwq_.mis.client.gui.MCCImmersiveScreen;
 import com.xiaoze_qwq_.mis.client.gui.StatusScreen;
 import com.xiaoze_qwq_.mis.client.util.ANSITextProcessorClient;
 import net.minecraft.client.Minecraft;
+import net.minecraft.network.chat.Component;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 
 public class ClientPacketHandlers {
@@ -48,6 +50,31 @@ public class ClientPacketHandlers {
             Minecraft.getInstance().execute(() -> {
                 if (Minecraft.getInstance().screen instanceof StatusScreen screen && screen.getInstanceId().equals(msg.instanceId())) {
                     screen.updateStatus(msg);
+                }
+            });
+        });
+    }
+
+    public static void handleCookieGrant(CookieGrantPacket msg, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            Minecraft.getInstance().execute(() -> {
+                ClientCookieStorage.saveCookie(ClientCookieStorage.currentServerAddress(), msg.token(), msg.expiresAt());
+            });
+        });
+    }
+
+    public static void handleCookieAuthResult(CookieAuthResultPacket msg, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            Minecraft.getInstance().execute(() -> {
+                String serverAddress = ClientCookieStorage.currentServerAddress();
+                if (msg.success()) {
+                    msg.newCookie().ifPresent(nc -> ClientCookieStorage.saveCookie(serverAddress, nc.token(), nc.expiresAt()));
+                } else {
+                    ClientCookieStorage.deleteCookie(serverAddress);
+                    Minecraft mc = Minecraft.getInstance();
+                    if (mc.player != null) {
+                        mc.player.sendSystemMessage(Component.literal("[MIS] Auto-login failed: " + msg.message()));
+                    }
                 }
             });
         });

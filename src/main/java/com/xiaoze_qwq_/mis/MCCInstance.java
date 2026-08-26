@@ -205,14 +205,28 @@ public class MCCInstance {
     }
 
     private void readOutputLoop() {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(processInputStream, StandardCharsets.UTF_8))) {
+        // 仅在获取共享状态引用时加锁，读取完成后立即释放，避免长时间持有锁
+        InputStream in;
+        processLock.readLock().lock();
+        try {
+            if (!running.get() || processInputStream == null) return;
+            in = processInputStream;
+        } finally {
+            processLock.readLock().unlock();
+        }
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
             String line;
-            while (running.get() && (line = reader.readLine()) != null) {
+            while (running.get() && !Thread.currentThread().isInterrupted() && (line = reader.readLine()) != null) {
                 long now = System.currentTimeMillis();
                 String raw = line;
                 String plain = ANSITextProcessor.toPlainText(raw);
                 outputRing.add(new LogEntry(raw, now));
-                if (outputLogger != null) outputLogger.writeLine(plain);
+                processLock.readLock().lock();
+                try {
+                    if (outputLogger != null) outputLogger.writeLine(plain);
+                } finally {
+                    processLock.readLock().unlock();
+                }
                 if (immersiveConsole.get()) {
                     printToConsole(raw, now);
                 }
@@ -253,25 +267,30 @@ public class MCCInstance {
     }
 
     private void cleanupAfterExit() {
-        if (processInputStream != null) {
-            try { processInputStream.close(); } catch (IOException ignored) {}
-            processInputStream = null;
+        processLock.writeLock().lock();
+        try {
+            if (processInputStream != null) {
+                try { processInputStream.close(); } catch (IOException ignored) {}
+                processInputStream = null;
+            }
+            if (outputReaderExecutor != null) {
+                outputReaderExecutor.shutdownNow();
+                outputReaderExecutor = null;
+            }
+            if (statusMonitor != null) {
+                statusMonitor.stop();
+                statusMonitor = null;
+            }
+            if (processWriter != null) {
+                try { processWriter.close(); } catch (IOException ignored) {}
+                processWriter = null;
+            }
+            mccProcess = null;
+            waitForExitThread = null;
+            currentPid.set(-1);
+        } finally {
+            processLock.writeLock().unlock();
         }
-        if (outputReaderExecutor != null) {
-            outputReaderExecutor.shutdownNow();
-            outputReaderExecutor = null;
-        }
-        if (statusMonitor != null) {
-            statusMonitor.stop();
-            statusMonitor = null;
-        }
-        if (processWriter != null) {
-            try { processWriter.close(); } catch (IOException ignored) {}
-            processWriter = null;
-        }
-        mccProcess = null;
-        waitForExitThread = null;
-        currentPid.set(-1);
     }
 
     private void sendInstanceRemovedPacket() {
@@ -279,13 +298,18 @@ public class MCCInstance {
     }
 
     private void closeLogger() {
-        if (outputLogger != null) {
-            try {
-                outputLogger.closeAndFinalize();
-            } catch (Exception e) {
-                LOGGER.error("[{}] Error closing logger", instanceId, e);
+        processLock.writeLock().lock();
+        try {
+            if (outputLogger != null) {
+                try {
+                    outputLogger.closeAndFinalize();
+                } catch (Exception e) {
+                    LOGGER.error("[{}] Error closing logger", instanceId, e);
+                }
+                outputLogger = null;
             }
-            outputLogger = null;
+        } finally {
+            processLock.writeLock().unlock();
         }
     }
 
@@ -311,17 +335,10 @@ public class MCCInstance {
         processLock.writeLock().lock();
         try {
             if (!running.get() && mccProcess == null) return;
+            // 1. 先置停止标志，使输出读取循环尽快退出
             running.set(false);
 
-            if (processInputStream != null) {
-                try { processInputStream.close(); } catch (IOException ignored) {}
-                processInputStream = null;
-            }
-            if (outputReaderExecutor != null) {
-                outputReaderExecutor.shutdownNow();
-                outputReaderExecutor = null;
-            }
-
+            // 2. 终止进程，使输出流自然关闭
             if (sendExit && processWriter != null && mccProcess != null && mccProcess.isAlive()) {
                 try {
                     processWriter.write("/exit " + config.exitCode);
@@ -344,6 +361,19 @@ public class MCCInstance {
                     mccProcess.destroyForcibly();
                     try { mccProcess.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
                 }
+            }
+
+            // 3. 关闭输出输入流，解除 readLine 阻塞
+            if (processInputStream != null) {
+                try { processInputStream.close(); } catch (IOException ignored) {}
+                processInputStream = null;
+            }
+
+            // 4. 关闭输出读取线程池并等待最多 1 秒
+            if (outputReaderExecutor != null) {
+                outputReaderExecutor.shutdownNow();
+                try { outputReaderExecutor.awaitTermination(1, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+                outputReaderExecutor = null;
             }
 
             if (waitForExitThread != null) {
@@ -501,10 +531,24 @@ public class MCCInstance {
     public List<String> getRecentOutput(int lines) {
         return outputRing.getLast(Math.min(lines, outputRing.size())).stream().map(e -> e.message).toList();
     }
-    public Process getProcess() { return mccProcess; }
+    public Process getProcess() {
+        processLock.readLock().lock();
+        try {
+            return mccProcess;
+        } finally {
+            processLock.readLock().unlock();
+        }
+    }
+    public StatusMonitor getStatusMonitor() {
+        processLock.readLock().lock();
+        try {
+            return statusMonitor;
+        } finally {
+            processLock.readLock().unlock();
+        }
+    }
     public long getPid() { return currentPid.get(); }
     public RingBuffer<LogEntry> getOutputRing() { return outputRing; }
-    public StatusMonitor getStatusMonitor() { return statusMonitor; }
     public ScheduledExecutorService getScheduler() { return scheduler; }
     public void removeDisconnectedPlayer(UUID uuid) {
         immersiveSubscribers.keySet().removeIf(p -> p.getUUID().equals(uuid));
@@ -516,14 +560,20 @@ public class MCCInstance {
     }
 
     public void updateConfig(MISConfig.InstanceConfig newConfig) {
-        this.config = newConfig;
-        resizeBuffer(newConfig.historyLimit);
-        if (outputLogger != null) {
-            outputLogger.closeAndFinalize();
-        }
-        outputLogger = new MCCOutputLogger(Paths.get(newConfig.logDirectory), newConfig);
-        if (running.get()) {
-            outputLogger.startNewLog();
+        processLock.writeLock().lock();
+        try {
+            this.config = newConfig;
+            resizeBuffer(newConfig.historyLimit);
+            MCCOutputLogger oldLogger = outputLogger;
+            if (oldLogger != null) {
+                oldLogger.closeAndFinalize();
+            }
+            outputLogger = new MCCOutputLogger(Paths.get(newConfig.logDirectory), newConfig);
+            if (running.get()) {
+                outputLogger.startNewLog();
+            }
+        } finally {
+            processLock.writeLock().unlock();
         }
     }
 }

@@ -20,6 +20,7 @@
     "mis.set.password.success": "密码已设置。",
     "mis.set.password.console_only": "只能在服务器控制台设置密码。",
     "mis.set.password.empty": "密码不能为空。",
+    "mis.set.password.log_commands_warning": "log-commands=true 时无法设置密码。请在控制台使用 /mis set password confirm <密码> 继续（密码将出现在服务器日志中）。",
     "mis.unset.password.success": "密码已清除。玩家将无法再使用 /mis verify 验证。",
     "mis.auth.console_only": "授权管理命令只能在服务器控制台使用。",
     "mis.auth.list.none": "当前没有任何授权记录。",
