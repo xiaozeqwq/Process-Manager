@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "${mod_id}",
+  "version": "${mod_version}",
+  "name": "${mod_name}",
+  "description": "Run MCC (Minecraft Console Client) inside Minecraft Server.",
+  "authors": [
+    "xiaoze_qwq_"
+  ],
+  "license": "${mod_license}",
+  "icon": "assets/mccinserver/icon.png",
+  "environment": "*",
+  "accessWidener": "mccinserver.accesswidener",
+  "entrypoints": {
+    "main": [
+      "com.xiaoze_qwq_.mis.fabric.MCCInServerFabric"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=${fabric_loader_version}",
+    "minecraft": "${minecraft_version}",
+    "architectury": ">=${architectury_api_version}"
+  }
+}

@@ -1,0 +1,90 @@
+plugins {
+    id 'com.gradleup.shadow'
+}
+
+architectury {
+    platformSetupLoomIde()
+    neoForge()
+}
+
+loom {
+    accessWidenerPath = project(':common').file('src/main/resources/mccinserver.accesswidener')
+}
+
+configurations {
+    common
+    shadowCommon
+    compileClasspath.extendsFrom common
+    runtimeClasspath.extendsFrom common
+    developmentNeoForge.extendsFrom common
+}
+
+dependencies {
+    neoForge "net.neoforged:neoforge:${rootProject.neo_version}"
+    modApi "dev.architectury:architectury-neoforge:${rootProject.architectury_api_version}"
+
+    common(project(path: ':common', configuration: 'namedElements')) { transitive false }
+    shadowCommon(project(path: ':common', configuration: 'transformProductionNeoForge')) { transitive false }
+
+    implementation 'com.moandjiezana.toml:toml4j:0.7.2'
+    implementation 'org.apache.commons:commons-compress:1.26.0'
+    implementation 'commons-codec:commons-codec:1.16.0'
+    shadow 'com.moandjiezana.toml:toml4j:0.7.2'
+    shadow 'org.apache.commons:commons-compress:1.26.0'
+    shadow 'commons-codec:commons-codec:1.16.0'
+}
+
+def replaceProperties = [
+        minecraft_version      : rootProject.minecraft_version,
+        minecraft_version_range: rootProject.minecraft_version_range,
+        loader_version_range   : rootProject.loader_version_range,
+        mod_id                 : rootProject.mod_id,
+        mod_name               : rootProject.mod_name,
+        mod_license            : rootProject.mod_license,
+        mod_version            : rootProject.mod_version,
+        architectury_api_version: rootProject.architectury_api_version
+]
+
+processResources {
+    inputs.properties replaceProperties
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand replaceProperties
+    }
+}
+
+shadowJar {
+    configurations = [project.configurations.shadowCommon, project.configurations.shadow]
+    archiveClassifier = 'dev-shadow'
+    relocate 'org.apache.commons.compress', 'com.xiaoze_qwq_.mis.shadow.compress'
+    relocate 'org.apache.commons.codec', 'com.xiaoze_qwq_.mis.shadow.codec'
+    relocate 'org.apache.commons.lang3', 'com.xiaoze_qwq_.mis.shadow.lang3'
+    relocate 'org.apache.commons.io', 'com.xiaoze_qwq_.mis.shadow.io'
+    relocate 'com.google.gson', 'com.xiaoze_qwq_.mis.shadow.gson'
+    relocate 'com.moandjiezana.toml', 'com.xiaoze_qwq_.mis.shadow.toml'
+    exclude 'META-INF/*.SF'
+    exclude 'META-INF/*.DSA'
+    exclude 'META-INF/*.RSA'
+    exclude 'fabric.mod.json'
+    exclude 'architectury.common.json'
+    mergeServiceFiles()
+}
+
+remapJar {
+    input.set shadowJar.archiveFile
+    dependsOn shadowJar
+    archiveClassifier = null
+}
+
+jar {
+    archiveClassifier = 'dev'
+}
+
+tasks.named('assemble').configure {
+    dependsOn remapJar
+}
+
+components.java {
+    withVariantsFromConfiguration(project.configurations.shadowRuntimeElements) {
+        skip()
+    }
+}
