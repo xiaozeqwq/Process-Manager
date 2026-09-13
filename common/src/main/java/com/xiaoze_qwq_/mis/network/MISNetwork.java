@@ -1,6 +1,7 @@
 package com.xiaoze_qwq_.mis.network;
 
 import dev.architectury.networking.NetworkManager;
+import dev.architectury.platform.Platform;
 import dev.architectury.utils.Env;
 import dev.architectury.utils.EnvExecutor;
 
@@ -31,6 +32,14 @@ public class MISNetwork {
                 CookieAuthPacket::handle
         );
 
+        if (Platform.getEnvironment() == Env.CLIENT) {
+            EnvExecutor.runInEnv(Env.CLIENT, () -> () -> registerClientPackets());
+        } else {
+            registerS2CPayloadTypes();
+        }
+    }
+
+    private static void registerS2CPayloadTypes() {
         NetworkManager.registerS2CPayloadType(MCCOutputPacket.TYPE, MCCOutputPacket.STREAM_CODEC);
         NetworkManager.registerS2CPayloadType(ImmersiveStatusPacket.TYPE, ImmersiveStatusPacket.STREAM_CODEC);
         NetworkManager.registerS2CPayloadType(OpenStatusScreenPacket.TYPE, OpenStatusScreenPacket.STREAM_CODEC);
@@ -38,8 +47,6 @@ public class MISNetwork {
         NetworkManager.registerS2CPayloadType(InstanceRemovedPacket.TYPE, InstanceRemovedPacket.STREAM_CODEC);
         NetworkManager.registerS2CPayloadType(CookieGrantPacket.TYPE, CookieGrantPacket.STREAM_CODEC);
         NetworkManager.registerS2CPayloadType(CookieAuthResultPacket.TYPE, CookieAuthResultPacket.STREAM_CODEC);
-
-        EnvExecutor.runInEnv(Env.CLIENT, () -> () -> registerClientPackets());
     }
 
     private static void registerClientPackets() {
