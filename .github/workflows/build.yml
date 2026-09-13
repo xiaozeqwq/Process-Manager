@@ -1,6 +1,12 @@
 name: Build
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -21,10 +27,33 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # This is needed to be able to run ./gradlew below
-      # You can run `git update-index --chmod +x gradlew` then remove this step.
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
 
       - name: Build with Gradle
         run: ./gradlew build
+
+      - name: Prepare artifacts
+        run: |
+          VERSION=$(grep '^mod_version=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
+          echo "MOD_VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir -p dist
+          cp "fabric/build/libs/mccinserver-${VERSION}.jar" "dist/mccinserver-${VERSION}-fabric.jar"
+          cp "neoforge/build/libs/mccinserver-${VERSION}.jar" "dist/mccinserver-${VERSION}-neoforge.jar"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mccinserver-${{ env.MOD_VERSION }}
+          path: dist/*.jar
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.MOD_VERSION }}
+          name: MCC In Server ${{ env.MOD_VERSION }}
+          files: dist/*.jar
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: true

@@ -38,3 +38,9 @@ run/
 **/src/generated/**/.cache/
 repo/
 !**/src/**/repo/
+
+### Architectury ###
+.architectury-transformer/
+
+### Leftover loader metadata in common ###
+common/src/main/resources/META-INF/
