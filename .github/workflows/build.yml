@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  build-fabric:
-    name: Fabric
+  compile-common:
+    name: Compile Common
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -24,6 +24,46 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Compile common
+        run: ./gradlew :common:build :common:transformProductionFabric :common:transformProductionNeoForge --parallel --max-workers=4 --build-cache
+
+      - name: Upload common build
+        uses: actions/upload-artifact@v4
+        with:
+          name: common-build
+          path: common/build
+          if-no-files-found: error
+
+  build-fabric:
+    name: Fabric
+    needs: [compile-common]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: true
+
+      - name: Restore common build
+        uses: actions/download-artifact@v4
+        with:
+          name: common-build
+          path: common/build
 
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
@@ -47,6 +87,7 @@ jobs:
 
   build-neoforge:
     name: NeoForge
+    needs: [compile-common]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -60,6 +101,14 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: true
+
+      - name: Restore common build
+        uses: actions/download-artifact@v4
+        with:
+          name: common-build
+          path: common/build
 
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew

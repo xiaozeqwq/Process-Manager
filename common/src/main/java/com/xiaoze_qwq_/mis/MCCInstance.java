@@ -147,7 +147,12 @@ public class MCCInstance {
                 }
             }
 
-            ProcessBuilder pb = new ProcessBuilder(execFile.getAbsolutePath());
+            List<String> command = new ArrayList<>();
+            command.add(execFile.getAbsolutePath());
+            if (config.arguments != null && !config.arguments.isEmpty()) {
+                command.addAll(config.arguments);
+            }
+            ProcessBuilder pb = new ProcessBuilder(command);
             pb.directory(workDir != null ? workDir : execFile.getParentFile());
             pb.redirectErrorStream(true);
             config.environment.forEach(pb.environment()::put);
