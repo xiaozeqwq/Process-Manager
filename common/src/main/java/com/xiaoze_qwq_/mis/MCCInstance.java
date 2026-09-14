@@ -38,6 +38,11 @@ public class MCCInstance {
     private final String instanceId;
     private MISConfig.InstanceConfig config;
     private final Logger LOGGER = MCCInServer.LOGGER;
+
+    // 直接写操作系统 stdout，绕过 Minecraft / 加载器的日志重定向
+    private static final PrintStream RAW_CONSOLE = new PrintStream(
+            new FileOutputStream(FileDescriptor.out), true, StandardCharsets.UTF_8);
+
     private final RingBuffer<LogEntry> outputRing;
     private final Map<ServerPlayer, Boolean> immersiveSubscribers = new ConcurrentHashMap<>();
     private final Set<ServerPlayer> statusSubscribers = ConcurrentHashMap.newKeySet();
@@ -526,7 +531,11 @@ public class MCCInstance {
             sb.append('[').append(time).append("] ");
         }
         sb.append('[').append(instanceId).append("] ").append(message);
-        System.out.println(sb);
+        if (config.outputAlone) {
+            RAW_CONSOLE.println(sb);
+        } else {
+            System.out.println(sb);
+        }
     }
 
     // ==================== 工具方法 ====================
