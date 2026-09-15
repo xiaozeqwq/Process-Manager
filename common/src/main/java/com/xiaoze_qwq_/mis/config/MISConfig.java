@@ -47,12 +47,6 @@ public class MISConfig {
     }
 
     // ==================== Cookie 令牌 HMAC 密钥 ====================
-    /**
-     * 获取用于 Cookie 令牌签名的 HMAC-SHA256 密钥。
-     * 若密钥文件不存在，使用 SecureRandom 生成 64 字节随机密钥，
-     * Base64 编码后写入 config/mis_secret.key，并将文件权限设置为 600。
-     * 该密钥仅用于 HMAC 签名，不用于加密。
-     */
     public static byte[] getSecretKey() {
         byte[] key = secretKey;
         if (key != null && key.length > 0) return key;
@@ -231,24 +225,10 @@ public class MISConfig {
         public boolean outputAlone = false;
         public boolean outputWithTime = true;
         public String outputTimeFormat = "HH:mm:ss";
-        // 图表数据点数上限
         public int chartMaxPoints = 60;
-
-        public void mergeMissing(InstanceConfig defaults) {
-            if (name.isEmpty() && defaults != null) name = defaults.name;
-            if (executablePath == null || executablePath.isEmpty()) executablePath = defaults.executablePath;
-            if (arguments.isEmpty()) arguments = defaults.arguments;
-            if (environment.isEmpty()) environment = defaults.environment;
-            if (workingDirectory.isEmpty()) workingDirectory = defaults.workingDirectory;
-            if (logDirectory.isEmpty()) logDirectory = defaults.logDirectory;
-            if (statusRefreshSeconds <= 0) statusRefreshSeconds = defaults.statusRefreshSeconds;
-            if (historyLimit <= 0) historyLimit = defaults.historyLimit;
-            if (exitCode < 0) exitCode = defaults.exitCode;
-            if (maxArchives <= 0) maxArchives = defaults.maxArchives;
-        }
     }
 
-    // ==================== 加载与保存 ====================
+    // ==================== 加载 ====================
     public static void load() {
         if (!Files.exists(CONFIG_PATH)) {
             defaultConfig = new InstanceConfig();
@@ -303,21 +283,18 @@ public class MISConfig {
                 String id = entry.getKey();
                 InstanceConfig cfg = entry.getValue();
 
-                // ID 必须为纯数字
                 if (!id.matches("\\d+")) {
                     MCCInServer.LOGGER.error("Instance ID '{}' is not a pure number. Skipping instance.", id);
                     it.remove();
                     continue;
                 }
 
-                // 名称不能是纯数字
                 if (cfg.name != null && cfg.name.matches("\\d+")) {
                     MCCInServer.LOGGER.error("Instance '{}' has a numeric name '{}'. Please use a non-numeric name.", id, cfg.name);
                     it.remove();
                     continue;
                 }
 
-                // 检查名称是否重复（不区分大小写）
                 String lowerName = (cfg.name != null ? cfg.name : "").toLowerCase(Locale.ROOT);
                 for (Map.Entry<String, InstanceConfig> other : instances.entrySet()) {
                     if (other.getKey().equals(id)) continue;
@@ -371,7 +348,6 @@ public class MISConfig {
         cfg.outputTimeFormat = table.getString("outputTimeFormat", "HH:mm:ss");
         cfg.chartMaxPoints = table.getLong("chartMaxPoints", 60L).intValue();
         if (cfg.chartMaxPoints < 10) cfg.chartMaxPoints = 60;
-        // 已移除的字段：检测到旧配置时仅记录警告并忽略，不导致启动失败
         if (table.getString("compressionStrategy") != null) {
             MCCInServer.LOGGER.warn("Instance '{}' contains deprecated field 'compressionStrategy' which is ignored.", fallbackId);
         }
@@ -379,6 +355,32 @@ public class MISConfig {
             MCCInServer.LOGGER.warn("Instance '{}' contains deprecated field 'scheduledCompressionMinutes' which is ignored.", fallbackId);
         }
         return cfg;
+    }
+
+    /** arguments 直接走 Toml.getList，转义由库处理 */
+    private static List<String> parseArguments(Toml table) {
+        Object raw = table.toMap().get("arguments");
+        if (raw instanceof List<?>) {
+            List<?> list = (List<?>) raw;
+            List<String> result = new ArrayList<>(list.size());
+            for (Object o : list) result.add(String.valueOf(o));
+            return result;
+        }
+        // 兼容旧格式 arguments = "a,b,c"
+        String str = table.getString("arguments");
+        if (str == null || str.isEmpty()) return new ArrayList<>();
+        return new ArrayList<>(Arrays.asList(str.split(",")));
+    }
+
+    /** environment 直接走 table.toMap()，由 Toml 库反转义 */
+    private static Map<String, String> parseEnvironment(Toml table) {
+        Object envObj = table.toMap().get("environment");
+        if (envObj instanceof Map<?, ?>) {
+            Map<String, String> map = new HashMap<>();
+            ((Map<?, ?>) envObj).forEach((k, v) -> map.put(String.valueOf(k), String.valueOf(v)));
+            return map;
+        }
+        return new HashMap<>();
     }
 
     private static void ensureDefaultConfig() {
@@ -403,104 +405,63 @@ public class MISConfig {
         if (cfg.maxArchives <= 0) cfg.maxArchives = defaults.maxArchives;
     }
 
-    private static Map<String, String> toStringMap(Toml table) {
-        Map<String, String> map = new HashMap<>();
-        table.toMap().forEach((k, v) -> map.put(k, v.toString()));
-        return map;
-    }
-
-    private static String formatStringArray(List<String> args) {
-        TomlWriter writer = new TomlWriter();
-        String serialized = writer.write(Collections.singletonMap("arguments", args));
-        int idx = serialized.indexOf('=');
-        return idx >= 0 ? serialized.substring(idx + 1).trim() : "[]";
-    }
-
-    private static String formatInlineTable(Map<String, String> env) {
-        StringBuilder sb = new StringBuilder("{");
-        boolean first = true;
-        for (Map.Entry<String, String> entry : env.entrySet()) {
-            if (!first) sb.append(", ");
-            first = false;
-            sb.append('"').append(escapeTomlString(entry.getKey()))
-                    .append("\" = \"")
-                    .append(escapeTomlString(entry.getValue()))
-                    .append('"');
-        }
-        sb.append('}');
-        return sb.toString();
-    }
-
-    private static String escapeTomlString(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"")
-                .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
-    }
-
-    private static List<String> parseArguments(Toml table) {
-        List<?> list = table.getList("arguments");
-        if (list != null) {
-            List<String> result = new ArrayList<>(list.size());
-            for (Object o : list) result.add(String.valueOf(o));
-            return result;
-        }
-        String str = table.getString("arguments");
-        if (str == null || str.isEmpty()) return new ArrayList<>();
-        return new ArrayList<>(Arrays.asList(str.split(",")));
-    }
-
-    private static Map<String, String> parseEnvironment(Toml table) {
-        Object envObj = table.toMap().get("environment");
-        if (envObj instanceof Map<?, ?>) {
-            Map<String, String> map = new HashMap<>();
-            ((Map<?, ?>) envObj).forEach((k, v) -> map.put(String.valueOf(k), String.valueOf(v)));
-            return map;
-        }
-        return new HashMap<>();
-    }
-
+    // ==================== 保存（全部交给 TomlWriter） ====================
     private static void saveToml() {
-        try (Writer writer = new OutputStreamWriter(Files.newOutputStream(CONFIG_PATH), StandardCharsets.UTF_8)) {
-            writer.write("# MIS Configuration (TOML)\n\n");
-            writer.write("[verify]\n");
-            writer.write("maxAttempts = " + verifyMaxAttempts + "\n");
-            writer.write("lockoutSeconds = " + verifyLockoutSeconds + "\n\n");
-            writer.write("[default]\n");
-            writeInstanceConfig(writer, defaultConfig, true);
-            writer.write("\n");
+        try {
+            Map<String, Object> root = new LinkedHashMap<>();
+
+            Map<String, Object> verify = new LinkedHashMap<>();
+            verify.put("maxAttempts", (long) verifyMaxAttempts);
+            verify.put("lockoutSeconds", (long) verifyLockoutSeconds);
+            root.put("verify", verify);
+
+            root.put("default", instanceToMap(defaultConfig, true));
+
+            List<Map<String, Object>> instanceList = new ArrayList<>();
             for (InstanceConfig cfg : instances.values()) {
-                writer.write("[[instances]]\n");
-                writer.write("id = \"" + cfg.id + "\"\n");
-                writeInstanceConfig(writer, cfg, false);
-                writer.write("\n");
+                instanceList.add(instanceToMap(cfg, false));
             }
+            root.put("instances", instanceList);
+
+            TomlWriter writer = new TomlWriter();
+            String body = writer.write(root);
+
+            String content = "# MIS Configuration (TOML)\n\n" + body;
+            if (CONFIG_PATH.getParent() != null) {
+                Files.createDirectories(CONFIG_PATH.getParent());
+            }
+            Files.write(CONFIG_PATH, content.getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
             MCCInServer.LOGGER.error("Failed to save mis_config.toml", e);
         }
     }
 
-    private static void writeInstanceConfig(Writer writer, InstanceConfig cfg, boolean skipId) throws IOException {
-        writer.write("name = \"" + cfg.name + "\"\n");
-        writer.write("autoStart = " + cfg.autoStart + "\n");
-        writer.write("startupDelaySeconds = " + cfg.startupDelaySeconds + "\n");
-        writer.write("workingDirectory = \"" + cfg.workingDirectory + "\"\n");
-        writer.write("executablePath = \"" + cfg.executablePath + "\"\n");
-        writer.write("arguments = " + formatStringArray(cfg.arguments) + "\n");
-        writer.write("environment = " + formatInlineTable(cfg.environment) + "\n");
-        writer.write("autoRestart = " + cfg.autoRestart + "\n");
-        writer.write("exitCode = " + cfg.exitCode + "\n");
-        writer.write("statusRefreshSeconds = " + cfg.statusRefreshSeconds + "\n");
-        writer.write("enableProcessMonitor = " + cfg.enableProcessMonitor + "\n");
-        writer.write("enableNetworkMonitor = " + cfg.enableNetworkMonitor + "\n");
-        writer.write("historyLimit = " + cfg.historyLimit + "\n");
-        writer.write("logDirectory = \"" + cfg.logDirectory + "\"\n");
-        writer.write("compressionFormat = \"" + cfg.compressionFormat + "\"\n");
-        writer.write("maxArchives = " + cfg.maxArchives + "\n");
-        writer.write("saveLogTime = " + cfg.saveLogTime + "\n");
-        writer.write("timeFormat = \"" + cfg.timeFormat + "\"\n");
-        writer.write("outputAlone = " + cfg.outputAlone + "\n");
-        writer.write("outputWithTime = " + cfg.outputWithTime + "\n");
-        writer.write("outputTimeFormat = \"" + cfg.outputTimeFormat + "\"\n");
-        writer.write("chartMaxPoints = " + cfg.chartMaxPoints + "\n");
+    private static Map<String, Object> instanceToMap(InstanceConfig cfg, boolean skipId) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (!skipId) m.put("id", cfg.id);
+        m.put("name", cfg.name);
+        m.put("autoStart", cfg.autoStart);
+        m.put("startupDelaySeconds", (long) cfg.startupDelaySeconds);
+        m.put("workingDirectory", cfg.workingDirectory);
+        m.put("executablePath", cfg.executablePath);
+        m.put("arguments", new ArrayList<>(cfg.arguments));
+        m.put("environment", new LinkedHashMap<>(cfg.environment));
+        m.put("autoRestart", cfg.autoRestart);
+        m.put("exitCode", (long) cfg.exitCode);
+        m.put("statusRefreshSeconds", (long) cfg.statusRefreshSeconds);
+        m.put("enableProcessMonitor", cfg.enableProcessMonitor);
+        m.put("enableNetworkMonitor", cfg.enableNetworkMonitor);
+        m.put("historyLimit", (long) cfg.historyLimit);
+        m.put("logDirectory", cfg.logDirectory);
+        m.put("compressionFormat", cfg.compressionFormat);
+        m.put("maxArchives", (long) cfg.maxArchives);
+        m.put("saveLogTime", cfg.saveLogTime);
+        m.put("timeFormat", cfg.timeFormat);
+        m.put("outputAlone", cfg.outputAlone);
+        m.put("outputWithTime", cfg.outputWithTime);
+        m.put("outputTimeFormat", cfg.outputTimeFormat);
+        m.put("chartMaxPoints", (long) cfg.chartMaxPoints);
+        return m;
     }
 
     // ==================== 公共访问器 ====================
