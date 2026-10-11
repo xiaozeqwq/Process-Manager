@@ -3,17 +3,17 @@
   "id": "${mod_id}",
   "version": "${mod_version}",
   "name": "${mod_name}",
-  "description": "Run MCC (Minecraft Console Client) inside Minecraft Server.",
+  "description": "Manage and run external programs inside a Minecraft server.",
   "authors": [
     "xiaoze_qwq_"
   ],
   "license": "${mod_license}",
-  "icon": "assets/mccinserver/icon.png",
+  "icon": "assets/processmanager/icon.png",
   "environment": "*",
-  "accessWidener": "mccinserver.accesswidener",
+  "accessWidener": "processmanager.accesswidener",
   "entrypoints": {
     "main": [
-      "com.xiaoze_qwq_.mis.fabric.MCCInServerFabric"
+      "com.xiaoze_qwq_.processmanager.fabric.ProcessManagerFabric"
     ]
   },
   "depends": {

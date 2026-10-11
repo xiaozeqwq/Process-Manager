@@ -76,7 +76,7 @@ jobs:
           VERSION=$(grep '^mod_version=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
           echo "MOD_VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p dist
-          cp "fabric/build/libs/mccinserver-${VERSION}.jar" "dist/mccinserver-${VERSION}-fabric.jar"
+          cp "fabric/build/libs/processmanager-${VERSION}.jar" "dist/processmanager-${VERSION}-fabric.jar"
 
       - name: Upload Fabric jar
         uses: actions/upload-artifact@v4
@@ -121,7 +121,7 @@ jobs:
           VERSION=$(grep '^mod_version=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
           echo "MOD_VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p dist
-          cp "neoforge/build/libs/mccinserver-${VERSION}.jar" "dist/mccinserver-${VERSION}-neoforge.jar"
+          cp "neoforge/build/libs/processmanager-${VERSION}.jar" "dist/processmanager-${VERSION}-neoforge.jar"
 
       - name: Upload NeoForge jar
         uses: actions/upload-artifact@v4
@@ -160,7 +160,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.MOD_VERSION }}
-          name: MCC In Server ${{ env.MOD_VERSION }}
+          name: Process Manager ${{ env.MOD_VERSION }}
           files: dist/*.jar
           generate_release_notes: true
           make_latest: true

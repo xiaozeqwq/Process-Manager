@@ -10,7 +10,7 @@ logoFile="icon.png"
 credits="xiaoze_qwq_"
 authors="xiaoze_qwq_"
 description='''
-Run MCC (Minecraft Console Client) inside Minecraft Server.
+Manage and run external programs inside a Minecraft server.
 '''
 
 [[dependencies.${mod_id}]]
