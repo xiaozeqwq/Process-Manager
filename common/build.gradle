@@ -3,7 +3,7 @@ architectury {
 }
 
 loom {
-    accessWidenerPath = file('src/main/resources/mccinserver.accesswidener')
+    accessWidenerPath = file('src/main/resources/processmanager.accesswidener')
 }
 
 dependencies {

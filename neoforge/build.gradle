@@ -8,7 +8,7 @@ architectury {
 }
 
 loom {
-    accessWidenerPath = project(':common').file('src/main/resources/mccinserver.accesswidener')
+    accessWidenerPath = project(':common').file('src/main/resources/processmanager.accesswidener')
 }
 
 configurations {
@@ -55,12 +55,12 @@ processResources {
 shadowJar {
     configurations = [project.configurations.shadowCommon, project.configurations.shadow]
     archiveClassifier = 'dev-shadow'
-    relocate 'org.apache.commons.compress', 'com.xiaoze_qwq_.mis.shadow.compress'
-    relocate 'org.apache.commons.codec', 'com.xiaoze_qwq_.mis.shadow.codec'
-    relocate 'org.apache.commons.lang3', 'com.xiaoze_qwq_.mis.shadow.lang3'
-    relocate 'org.apache.commons.io', 'com.xiaoze_qwq_.mis.shadow.io'
-    relocate 'com.google.gson', 'com.xiaoze_qwq_.mis.shadow.gson'
-    relocate 'com.moandjiezana.toml', 'com.xiaoze_qwq_.mis.shadow.toml'
+    relocate 'org.apache.commons.compress', 'com.xiaoze_qwq_.processmanager.shadow.compress'
+    relocate 'org.apache.commons.codec', 'com.xiaoze_qwq_.processmanager.shadow.codec'
+    relocate 'org.apache.commons.lang3', 'com.xiaoze_qwq_.processmanager.shadow.lang3'
+    relocate 'org.apache.commons.io', 'com.xiaoze_qwq_.processmanager.shadow.io'
+    relocate 'com.google.gson', 'com.xiaoze_qwq_.processmanager.shadow.gson'
+    relocate 'com.moandjiezana.toml', 'com.xiaoze_qwq_.processmanager.shadow.toml'
     exclude 'META-INF/*.SF'
     exclude 'META-INF/*.DSA'
     exclude 'META-INF/*.RSA'
