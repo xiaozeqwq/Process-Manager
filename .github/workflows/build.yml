@@ -73,10 +73,11 @@ jobs:
 
       - name: Prepare Fabric artifact
         run: |
+          MOD_ID=$(grep '^mod_id=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
           VERSION=$(grep '^mod_version=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
           echo "MOD_VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p dist
-          cp "fabric/build/libs/processmanager-${VERSION}.jar" "dist/processmanager-${VERSION}-fabric.jar"
+          cp "fabric/build/libs/${MOD_ID}-${VERSION}.jar" "dist/${MOD_ID}-${VERSION}-fabric.jar"
 
       - name: Upload Fabric jar
         uses: actions/upload-artifact@v4
@@ -118,10 +119,11 @@ jobs:
 
       - name: Prepare NeoForge artifact
         run: |
+          MOD_ID=$(grep '^mod_id=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
           VERSION=$(grep '^mod_version=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
           echo "MOD_VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p dist
-          cp "neoforge/build/libs/processmanager-${VERSION}.jar" "dist/processmanager-${VERSION}-neoforge.jar"
+          cp "neoforge/build/libs/${MOD_ID}-${VERSION}.jar" "dist/${MOD_ID}-${VERSION}-neoforge.jar"
 
       - name: Upload NeoForge jar
         uses: actions/upload-artifact@v4
