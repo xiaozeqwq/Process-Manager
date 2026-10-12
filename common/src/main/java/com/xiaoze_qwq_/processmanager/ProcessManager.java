@@ -4,6 +4,8 @@ import com.xiaoze_qwq_.processmanager.client.ClientAutoLoginHandler;
 import com.xiaoze_qwq_.processmanager.command.CommandRegistry;
 import com.xiaoze_qwq_.processmanager.config.Config;
 import com.xiaoze_qwq_.processmanager.network.NetworkRegistry;
+import com.xiaoze_qwq_.processmanager.ssh.ListenerHook;
+import com.xiaoze_qwq_.processmanager.ssh.SshServerHost;
 import dev.architectury.event.events.common.CommandRegistrationEvent;
 import dev.architectury.event.events.common.LifecycleEvent;
 import dev.architectury.event.events.common.PlayerEvent;
@@ -13,6 +15,7 @@ import dev.architectury.utils.EnvExecutor;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.ServerConnectionListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,6 +33,7 @@ public class ProcessManager {
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
     private static volatile MinecraftServer serverInstance;
     private static ScheduledExecutorService sessionPurger;
+    private static SshServerHost sshServerHost;
 
     public static void init() {
         NetworkRegistry.register();
@@ -65,9 +69,45 @@ public class ProcessManager {
         });
         sessionPurger.scheduleAtFixedRate(SessionManager.getInstance()::purgeExpired, 10, 10, TimeUnit.MINUTES);
         InstanceManager.getInstance().start();
+        startEmbeddedSsh(server);
+    }
+
+    private static void startEmbeddedSsh(MinecraftServer server) {
+        if (!Config.isSshEnabled()) {
+            LOGGER.info("Embedded SSH server is disabled ([ssh] enabled = false).");
+            return;
+        }
+        try {
+            ServerConnectionListener listener = server.getConnection();
+            if (listener == null) {
+                LOGGER.warn("ServerConnectionListener unavailable; embedded SSH server not started.");
+                return;
+            }
+            SshServerHost host = new SshServerHost(Config.getSshUser());
+            host.start();
+            int installed = ListenerHook.install(listener, host.getLocalPort());
+            if (installed == 0) {
+                host.stop();
+                LOGGER.warn("No Minecraft listener channels found; embedded SSH server not installed.");
+                return;
+            }
+            sshServerHost = host;
+            LOGGER.info("Embedded SSH server multiplexed over the Minecraft port. Connect with: ssh -p <mc-port> {}@<host>", Config.getSshUser());
+        } catch (Throwable t) {
+            LOGGER.error("Failed to start embedded SSH server", t);
+        }
+    }
+
+    private static void stopEmbeddedSsh() {
+        SshServerHost host = sshServerHost;
+        sshServerHost = null;
+        if (host != null) {
+            host.stop();
+        }
     }
 
     private static void onServerStopping(MinecraftServer server) {
+        stopEmbeddedSsh();
         if (sessionPurger != null) {
             sessionPurger.shutdownNow();
             sessionPurger = null;

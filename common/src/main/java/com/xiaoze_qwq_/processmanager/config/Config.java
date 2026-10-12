@@ -42,6 +42,12 @@ public class Config {
     private static int verifyLockoutSeconds = 60;
     private static final Map<UUID, long[]> verifyFailures = new ConcurrentHashMap<>();
 
+    // ==================== SSH 复用（与 Minecraft 共用同一端口） ====================
+    private static volatile boolean sshEnabled = false;
+    private static volatile String sshUser = "pm";
+    private static volatile String sshShell = "";
+    private static volatile String sshWorkingDirectory = "";
+
     static {
         load();
     }
@@ -200,6 +206,32 @@ public class Config {
         verifyFailures.remove(uuid);
     }
 
+    // ==================== SSH 配置访问器 ====================
+    public static boolean isSshEnabled() { return sshEnabled; }
+    public static String getSshUser() { return sshUser; }
+    public static String getSshShell() { return sshShell; }
+    public static String getSshWorkingDirectory() { return sshWorkingDirectory; }
+
+    public static void setSshEnabled(boolean enabled) {
+        sshEnabled = enabled;
+        saveToml();
+    }
+
+    public static void setSshUser(String user) {
+        sshUser = (user == null || user.isEmpty()) ? "pm" : user;
+        saveToml();
+    }
+
+    public static void setSshShell(String shell) {
+        sshShell = shell == null ? "" : shell;
+        saveToml();
+    }
+
+    public static void setSshWorkingDirectory(String dir) {
+        sshWorkingDirectory = dir == null ? "" : dir;
+        saveToml();
+    }
+
     // ==================== 配置数据类 ====================
     public static class InstanceConfig {
         public String id;
@@ -254,6 +286,17 @@ public class Config {
                 if (maxAttempts != null && maxAttempts > 0) verifyMaxAttempts = maxAttempts.intValue();
                 Long lockoutSeconds = verifyTable.getLong("lockoutSeconds");
                 if (lockoutSeconds != null && lockoutSeconds > 0) verifyLockoutSeconds = lockoutSeconds.intValue();
+            }
+
+            Toml sshTable = toml.getTable("ssh");
+            if (sshTable != null) {
+                sshEnabled = sshTable.getBoolean("enabled", false);
+                String u = sshTable.getString("user", "pm");
+                sshUser = (u == null || u.isEmpty()) ? "pm" : u;
+                String sh = sshTable.getString("shell", "");
+                sshShell = sh == null ? "" : sh;
+                String wd = sshTable.getString("workingDirectory", "");
+                sshWorkingDirectory = wd == null ? "" : wd;
             }
 
             defaultConfig = parseInstanceConfig(toml.getTable("default"), "default");
@@ -409,6 +452,13 @@ public class Config {
             verify.put("maxAttempts", (long) verifyMaxAttempts);
             verify.put("lockoutSeconds", (long) verifyLockoutSeconds);
             root.put("verify", verify);
+
+            Map<String, Object> ssh = new LinkedHashMap<>();
+            ssh.put("enabled", sshEnabled);
+            ssh.put("user", sshUser);
+            ssh.put("shell", sshShell);
+            ssh.put("workingDirectory", sshWorkingDirectory);
+            root.put("ssh", ssh);
 
             root.put("default", instanceToMap(defaultConfig, true));
 

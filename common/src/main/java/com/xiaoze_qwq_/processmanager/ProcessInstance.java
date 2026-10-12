@@ -588,7 +588,7 @@ public class ProcessInstance {
     /**
      * 将启动命令字符串拆分为参数列表，支持单引号与双引号包裹含空格的参数。
      */
-    static List<String> tokenizeCommand(String command) {
+    public static List<String> tokenizeCommand(String command) {
         List<String> tokens = new ArrayList<>();
         if (command == null) return tokens;
         StringBuilder current = new StringBuilder();

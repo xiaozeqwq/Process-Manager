@@ -29,9 +29,15 @@ dependencies {
     implementation 'com.moandjiezana.toml:toml4j:0.7.2'
     implementation 'org.apache.commons:commons-compress:1.26.0'
     implementation 'commons-codec:commons-codec:1.16.0'
+    implementation 'org.apache.sshd:sshd-core:2.13.2'
+    implementation 'org.jetbrains.pty4j:pty4j:0.12.13'
     shadow 'com.moandjiezana.toml:toml4j:0.7.2'
     shadow 'org.apache.commons:commons-compress:1.26.0'
     shadow 'commons-codec:commons-codec:1.16.0'
+    shadow('org.apache.sshd:sshd-core:2.13.2') {
+        exclude group: 'org.slf4j'
+    }
+    shadow 'org.jetbrains.pty4j:pty4j:0.12.13'
 }
 
 def replaceProperties = [
@@ -62,9 +68,12 @@ shadowJar {
     relocate 'org.apache.commons.io', 'com.xiaoze_qwq_.processmanager.shadow.io'
     relocate 'com.google.gson', 'com.xiaoze_qwq_.processmanager.shadow.gson'
     relocate 'com.moandjiezana.toml', 'com.xiaoze_qwq_.processmanager.shadow.toml'
+    relocate 'org.apache.sshd', 'com.xiaoze_qwq_.processmanager.shadow.sshd'
     exclude 'META-INF/*.SF'
     exclude 'META-INF/*.DSA'
     exclude 'META-INF/*.RSA'
+    exclude 'module-info.class'
+    exclude 'META-INF/versions/**/module-info.class'
     exclude 'architectury.common.json'
     exclude 'META-INF/neoforge.mods.toml'
     mergeServiceFiles()
