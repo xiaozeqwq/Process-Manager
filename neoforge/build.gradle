@@ -29,15 +29,23 @@ dependencies {
     implementation 'com.moandjiezana.toml:toml4j:0.7.2'
     implementation 'org.apache.commons:commons-compress:1.26.0'
     implementation 'commons-codec:commons-codec:1.16.0'
-    implementation 'org.apache.sshd:sshd-core:2.13.2'
-    implementation 'org.jetbrains.pty4j:pty4j:0.12.13'
+    implementation('org.apache.sshd:sshd-core:2.13.2') {
+        exclude group: 'org.slf4j'
+    }
+    implementation('org.jetbrains.pty4j:pty4j:0.12.13') {
+        exclude group: 'org.jetbrains.pty4j', module: 'purejavacomm'
+        exclude group: 'org.slf4j'
+    }
     shadow 'com.moandjiezana.toml:toml4j:0.7.2'
     shadow 'org.apache.commons:commons-compress:1.26.0'
     shadow 'commons-codec:commons-codec:1.16.0'
     shadow('org.apache.sshd:sshd-core:2.13.2') {
         exclude group: 'org.slf4j'
     }
-    shadow 'org.jetbrains.pty4j:pty4j:0.12.13'
+    shadow('org.jetbrains.pty4j:pty4j:0.12.13') {
+        exclude group: 'org.jetbrains.pty4j', module: 'purejavacomm'
+        exclude group: 'org.slf4j'
+    }
 }
 
 def replaceProperties = [
