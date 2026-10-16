@@ -1,7 +1,8 @@
 package com.xiaoze_qwq_.processmanager.ssh;
 
-import com.xiaoze_qwq_.processmanager.ProcessManager;
+import com.xiaoze_qwq_.processmanager.InstanceManager;
 import com.xiaoze_qwq_.processmanager.ProcessInstance;
+import com.xiaoze_qwq_.processmanager.ProcessManager;
 import com.xiaoze_qwq_.processmanager.config.Config;
 import dev.architectury.platform.Platform;
 import org.apache.sshd.server.SshServer;
@@ -15,22 +16,40 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.file.Path;
-import java.util.List;
 
 /**
  * 内嵌 SSH 服务端。仅监听回环地址，外网流量由 {@link ProtocolSniffHandler}
- * 从 Minecraft 端口嗅探后桥接进来。认证复用 PM 密码。
+ * 从 Minecraft 端口嗅探后桥接进来。每个已启用 SSH 的实例拥有独立的用户名与 bcrypt 密码，
+ * 登录后直接接入对应实例的控制台（不提供 shell）。
  */
-public class SshServerHost {
-    private final String user;
+public final class SshServerHost {
+    private static SshServerHost instance;
+
     private SshServer sshd;
     private int localPort = -1;
 
-    public SshServerHost(String user) {
-        this.user = (user == null || user.isEmpty()) ? "pm" : user;
+    private SshServerHost() {
     }
 
-    public void start() throws IOException {
+    public static synchronized void start() throws IOException {
+        if (instance != null) return;
+        if (!Config.hasConfiguredSshInstance()) return;
+        SshServerHost host = new SshServerHost();
+        host.doStart();
+        instance = host;
+    }
+
+    public static synchronized void stop() {
+        SshServerHost host = instance;
+        instance = null;
+        if (host != null) host.doStop();
+    }
+
+    public static synchronized int getPort() {
+        return instance != null ? instance.localPort : -1;
+    }
+
+    private void doStart() throws IOException {
         Path hostKey = Platform.getConfigFolder().resolve("pm_ssh_hostkey.ser");
 
         sshd = SshServer.setUpDefaultServer();
@@ -39,7 +58,7 @@ public class SshServerHost {
         sshd.setKeyPairProvider(new SimpleGeneratorHostKeyProvider(hostKey));
         sshd.setPasswordAuthenticator((username, password, session) -> authenticate(username, password));
 
-        ShellCommandFactory factory = new ShellCommandFactory();
+        ConsoleCommandFactory factory = new ConsoleCommandFactory();
         sshd.setShellFactory(factory);
         sshd.setCommandFactory(factory);
 
@@ -57,20 +76,17 @@ public class SshServerHost {
     }
 
     private boolean authenticate(String username, String password) {
-        if (password == null || !user.equals(username)) return false;
-        if (!Config.hasPassword()) return false;
+        if (username == null || password == null) return false;
+        Config.InstanceConfig cfg = Config.findInstanceBySshUser(username);
+        if (cfg == null || !cfg.sshEnabled) return false;
         try {
-            return Config.verifyPassword(password);
+            return Config.verifyInstanceSshPassword(cfg.id, password);
         } catch (Throwable t) {
             return false;
         }
     }
 
-    public int getLocalPort() {
-        return localPort;
-    }
-
-    public void stop() {
+    private void doStop() {
         SshServer server = sshd;
         sshd = null;
         if (server != null) {
@@ -82,34 +98,25 @@ public class SshServerHost {
         }
     }
 
-    private static final class ShellCommandFactory implements ShellFactory, CommandFactory {
+    /** 无论 shell 还是 exec 请求，都接入会话所属实例的控制台。 */
+    private static final class ConsoleCommandFactory implements ShellFactory, CommandFactory {
         @Override
         public Command createShell(ChannelSession channel) {
-            return new PtyShellCommand(defaultShellCommand(), Config.getSshWorkingDirectory());
+            return createCommand(channel, null);
         }
 
         @Override
         public Command createCommand(ChannelSession channel, String command) {
-            List<String> parts = ProcessInstance.tokenizeCommand(command);
-            if (parts.isEmpty()) {
-                return new PtyShellCommand(defaultShellCommand(), Config.getSshWorkingDirectory());
+            String username = channel.getSession() != null ? channel.getSession().getUsername() : null;
+            Config.InstanceConfig cfg = Config.findInstanceBySshUser(username);
+            if (cfg == null) {
+                throw new IllegalStateException("No SSH-configured instance for user '" + username + "'");
             }
-            return new PtyShellCommand(parts.toArray(new String[0]), Config.getSshWorkingDirectory());
-        }
-
-        private static String[] defaultShellCommand() {
-            String configured = Config.getSshShell();
-            if (configured != null && !configured.trim().isEmpty()) {
-                List<String> parts = ProcessInstance.tokenizeCommand(configured);
-                if (!parts.isEmpty()) {
-                    return parts.toArray(new String[0]);
-                }
+            ProcessInstance target = InstanceManager.getInstance().getInstance(cfg.id);
+            if (target == null) {
+                throw new IllegalStateException("Instance '" + cfg.id + "' is not loaded");
             }
-            String shell = System.getenv("SHELL");
-            if (shell == null || shell.isEmpty()) {
-                shell = "/bin/sh";
-            }
-            return new String[]{shell};
+            return new InstanceConsoleCommand(target);
         }
     }
 }

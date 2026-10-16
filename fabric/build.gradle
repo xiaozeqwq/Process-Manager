@@ -46,6 +46,8 @@ dependencies {
         exclude group: 'org.jetbrains.pty4j', module: 'purejavacomm'
         exclude group: 'org.slf4j'
     }
+    implementation 'at.favre.lib:bcrypt:0.10.2'
+    shadow 'at.favre.lib:bcrypt:0.10.2'
 }
 
 def replaceProperties = [
@@ -77,6 +79,7 @@ shadowJar {
     relocate 'com.google.gson', 'com.xiaoze_qwq_.processmanager.shadow.gson'
     relocate 'com.moandjiezana.toml', 'com.xiaoze_qwq_.processmanager.shadow.toml'
     relocate 'org.apache.sshd', 'com.xiaoze_qwq_.processmanager.shadow.sshd'
+    relocate 'at.favre.lib', 'com.xiaoze_qwq_.processmanager.shadow.bcrypt'
     exclude 'META-INF/*.SF'
     exclude 'META-INF/*.DSA'
     exclude 'META-INF/*.RSA'

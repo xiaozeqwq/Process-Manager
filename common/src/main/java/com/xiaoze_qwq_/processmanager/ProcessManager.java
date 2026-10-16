@@ -33,7 +33,6 @@ public class ProcessManager {
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
     private static volatile MinecraftServer serverInstance;
     private static ScheduledExecutorService sessionPurger;
-    private static SshServerHost sshServerHost;
 
     public static void init() {
         NetworkRegistry.register();
@@ -73,8 +72,8 @@ public class ProcessManager {
     }
 
     private static void startEmbeddedSsh(MinecraftServer server) {
-        if (!Config.isSshEnabled()) {
-            LOGGER.info("Embedded SSH server is disabled ([ssh] enabled = false).");
+        if (!Config.hasConfiguredSshInstance()) {
+            LOGGER.info("No instance has SSH enabled; embedded SSH server not started.");
             return;
         }
         try {
@@ -83,27 +82,34 @@ public class ProcessManager {
                 LOGGER.warn("ServerConnectionListener unavailable; embedded SSH server not started.");
                 return;
             }
-            SshServerHost host = new SshServerHost(Config.getSshUser());
-            host.start();
-            int installed = ListenerHook.install(listener, host.getLocalPort());
+            SshServerHost.start();
+            int localPort = SshServerHost.getPort();
+            if (localPort <= 0) {
+                LOGGER.warn("Embedded SSH server failed to bind; not installed.");
+                return;
+            }
+            int installed = ListenerHook.install(listener, localPort);
             if (installed == 0) {
-                host.stop();
+                SshServerHost.stop();
                 LOGGER.warn("No Minecraft listener channels found; embedded SSH server not installed.");
                 return;
             }
-            sshServerHost = host;
-            LOGGER.info("Embedded SSH server multiplexed over the Minecraft port. Connect with: ssh -p <mc-port> {}@<host>", Config.getSshUser());
+            LOGGER.info("Embedded SSH server multiplexed over the Minecraft port. Connect with: ssh -p <mc-port> <ssh-user>@<host>");
         } catch (Throwable t) {
             LOGGER.error("Failed to start embedded SSH server", t);
         }
     }
 
     private static void stopEmbeddedSsh() {
-        SshServerHost host = sshServerHost;
-        sshServerHost = null;
-        if (host != null) {
-            host.stop();
-        }
+        SshServerHost.stop();
+    }
+
+    /** 在实例 SSH 配置发生变化后调用：若已有实例启用 SSH 而服务端尚未启动，则懒启动。 */
+    public static void ensureEmbeddedSsh() {
+        if (SshServerHost.getPort() > 0) return;
+        MinecraftServer server = serverInstance;
+        if (server == null) return;
+        startEmbeddedSsh(server);
     }
 
     private static void onServerStopping(MinecraftServer server) {

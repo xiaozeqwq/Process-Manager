@@ -1,5 +1,6 @@
 package com.xiaoze_qwq_.processmanager.config;
 
+import at.favre.lib.crypto.bcrypt.BCrypt;
 import com.moandjiezana.toml.Toml;
 import com.moandjiezana.toml.TomlWriter;
 import com.xiaoze_qwq_.processmanager.ProcessManager;
@@ -42,11 +43,7 @@ public class Config {
     private static int verifyLockoutSeconds = 60;
     private static final Map<UUID, long[]> verifyFailures = new ConcurrentHashMap<>();
 
-    // ==================== SSH 复用（与 Minecraft 共用同一端口） ====================
-    private static volatile boolean sshEnabled = false;
-    private static volatile String sshUser = "pm";
-    private static volatile String sshShell = "";
-    private static volatile String sshWorkingDirectory = "";
+    private static final int BCRYPT_COST = 12;
 
     static {
         load();
@@ -206,30 +203,72 @@ public class Config {
         verifyFailures.remove(uuid);
     }
 
-    // ==================== SSH 配置访问器 ====================
-    public static boolean isSshEnabled() { return sshEnabled; }
-    public static String getSshUser() { return sshUser; }
-    public static String getSshShell() { return sshShell; }
-    public static String getSshWorkingDirectory() { return sshWorkingDirectory; }
+    // ==================== 实例 SSH 配置（bcrypt 存储） ====================
+    public static String bcryptHash(String plain) {
+        return BCrypt.with(BCrypt.Version.VERSION_2B).hashToString(BCRYPT_COST, plain.toCharArray());
+    }
 
-    public static void setSshEnabled(boolean enabled) {
-        sshEnabled = enabled;
+    public static boolean bcryptVerify(String plain, String hash) {
+        if (plain == null || hash == null || hash.isEmpty()) return false;
+        try {
+            return BCrypt.verifyer().verify(plain.toCharArray(), hash).verified;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 设置某实例的 SSH 密码（bcrypt 哈希后保存到配置）。 */
+    public static boolean setInstanceSshPassword(String id, String plain) {
+        InstanceConfig cfg = instances.get(id);
+        if (cfg == null || plain == null || plain.isEmpty()) return false;
+        cfg.sshPasswordHash = bcryptHash(plain);
+        saveToml();
+        return true;
+    }
+
+    /** 清除某实例的 SSH 密码。 */
+    public static void clearInstanceSshPassword(String id) {
+        InstanceConfig cfg = instances.get(id);
+        if (cfg == null) return;
+        cfg.sshPasswordHash = "";
         saveToml();
     }
 
-    public static void setSshUser(String user) {
-        sshUser = (user == null || user.isEmpty()) ? "pm" : user;
-        saveToml();
+    /** 校验某实例的 SSH 密码。 */
+    public static boolean verifyInstanceSshPassword(String id, String plain) {
+        InstanceConfig cfg = instances.get(id);
+        if (cfg == null) return false;
+        return bcryptVerify(plain, cfg.sshPasswordHash);
     }
 
-    public static void setSshShell(String shell) {
-        sshShell = shell == null ? "" : shell;
-        saveToml();
+    /** SSH 用户名是否已被其他实例占用（不区分大小写）。 */
+    public static boolean isSshUserTaken(String user, String exceptId) {
+        if (user == null || user.isEmpty()) return false;
+        for (InstanceConfig cfg : instances.values()) {
+            if (cfg.id != null && cfg.id.equals(exceptId)) continue;
+            if (cfg.sshUser != null && cfg.sshUser.equalsIgnoreCase(user)) return true;
+        }
+        return false;
     }
 
-    public static void setSshWorkingDirectory(String dir) {
-        sshWorkingDirectory = dir == null ? "" : dir;
-        saveToml();
+    /** 是否存在已开启并配置完整的 SSH 实例（启用 + 用户名 + 密码）。 */
+    public static boolean hasConfiguredSshInstance() {
+        for (InstanceConfig cfg : instances.values()) {
+            if (cfg.sshEnabled && cfg.sshUser != null && !cfg.sshUser.isEmpty()
+                    && cfg.sshPasswordHash != null && !cfg.sshPasswordHash.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 按 SSH 用户名查找实例。 */
+    public static InstanceConfig findInstanceBySshUser(String user) {
+        if (user == null) return null;
+        for (InstanceConfig cfg : instances.values()) {
+            if (cfg.sshUser != null && cfg.sshUser.equals(user)) return cfg;
+        }
+        return null;
     }
 
     // ==================== 配置数据类 ====================
@@ -261,6 +300,13 @@ public class Config {
         public boolean outputWithTime = true;
         public String outputTimeFormat = "HH:mm:ss";
         public int chartMaxPoints = 60;
+
+        /** 是否允许该实例通过 SSH 接入其控制台（与 Minecraft 共用端口）。 */
+        public boolean sshEnabled = false;
+        /** SSH 登录用户名（全局唯一，不区分大小写）。 */
+        public String sshUser = "";
+        /** SSH 密码的 bcrypt ($2b$) 哈希，加密保存，不存明文。 */
+        public String sshPasswordHash = "";
     }
 
     // ==================== 加载 ====================
@@ -286,17 +332,6 @@ public class Config {
                 if (maxAttempts != null && maxAttempts > 0) verifyMaxAttempts = maxAttempts.intValue();
                 Long lockoutSeconds = verifyTable.getLong("lockoutSeconds");
                 if (lockoutSeconds != null && lockoutSeconds > 0) verifyLockoutSeconds = lockoutSeconds.intValue();
-            }
-
-            Toml sshTable = toml.getTable("ssh");
-            if (sshTable != null) {
-                sshEnabled = sshTable.getBoolean("enabled", false);
-                String u = sshTable.getString("user", "pm");
-                sshUser = (u == null || u.isEmpty()) ? "pm" : u;
-                String sh = sshTable.getString("shell", "");
-                sshShell = sh == null ? "" : sh;
-                String wd = sshTable.getString("workingDirectory", "");
-                sshWorkingDirectory = wd == null ? "" : wd;
             }
 
             defaultConfig = parseInstanceConfig(toml.getTable("default"), "default");
@@ -396,6 +431,11 @@ public class Config {
         cfg.outputTimeFormat = table.getString("outputTimeFormat", "HH:mm:ss");
         cfg.chartMaxPoints = table.getLong("chartMaxPoints", 60L).intValue();
         if (cfg.chartMaxPoints < 10) cfg.chartMaxPoints = 60;
+        cfg.sshEnabled = table.getBoolean("sshEnabled", false);
+        String sshUserValue = table.getString("sshUser", "");
+        cfg.sshUser = sshUserValue == null ? "" : sshUserValue;
+        String sshHashValue = table.getString("sshPasswordHash", "");
+        cfg.sshPasswordHash = sshHashValue == null ? "" : sshHashValue;
         if (table.getString("executablePath") != null || table.toMap().containsKey("arguments")) {
             ProcessManager.LOGGER.warn("Instance '{}' contains deprecated fields 'executablePath'/'arguments' which are ignored. Use 'command' instead.", fallbackId);
         }
@@ -441,6 +481,8 @@ public class Config {
         if (cfg.historyLimit <= 0) cfg.historyLimit = defaults.historyLimit;
         if (cfg.exitCode < 0) cfg.exitCode = defaults.exitCode;
         if (cfg.maxArchives <= 0) cfg.maxArchives = defaults.maxArchives;
+        if (cfg.sshUser == null) cfg.sshUser = "";
+        if (cfg.sshPasswordHash == null) cfg.sshPasswordHash = "";
     }
 
     // ==================== 保存（全部交给 TomlWriter） ====================
@@ -452,13 +494,6 @@ public class Config {
             verify.put("maxAttempts", (long) verifyMaxAttempts);
             verify.put("lockoutSeconds", (long) verifyLockoutSeconds);
             root.put("verify", verify);
-
-            Map<String, Object> ssh = new LinkedHashMap<>();
-            ssh.put("enabled", sshEnabled);
-            ssh.put("user", sshUser);
-            ssh.put("shell", sshShell);
-            ssh.put("workingDirectory", sshWorkingDirectory);
-            root.put("ssh", ssh);
 
             root.put("default", instanceToMap(defaultConfig, true));
 
@@ -508,6 +543,9 @@ public class Config {
         m.put("outputWithTime", cfg.outputWithTime);
         m.put("outputTimeFormat", cfg.outputTimeFormat);
         m.put("chartMaxPoints", (long) cfg.chartMaxPoints);
+        m.put("sshEnabled", cfg.sshEnabled);
+        m.put("sshUser", cfg.sshUser == null ? "" : cfg.sshUser);
+        m.put("sshPasswordHash", cfg.sshPasswordHash == null ? "" : cfg.sshPasswordHash);
         return m;
     }
 
@@ -537,6 +575,9 @@ public class Config {
             case "outputAlone": cfg.outputAlone = (boolean) value; break;
             case "outputWithTime": cfg.outputWithTime = (boolean) value; break;
             case "outputTimeFormat": cfg.outputTimeFormat = (String) value; break;
+            case "sshEnabled": cfg.sshEnabled = (boolean) value; break;
+            case "sshUser": cfg.sshUser = value == null ? "" : (String) value; break;
+            case "sshPasswordHash": cfg.sshPasswordHash = value == null ? "" : (String) value; break;
         }
         saveToml();
     }

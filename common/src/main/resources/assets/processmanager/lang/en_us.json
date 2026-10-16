@@ -77,6 +77,7 @@
     "pm.immersive.already_off_player": "Immersive mode is already OFF for you.",
     "pm.immersive.window_title": "Console Output",
     "pm.immersive.close_button": "Close",
+    "pm.immersive.ssh_disabled": "Immersive mode is unavailable because SSH is enabled for this instance.",
 
     "pm.status.opening_gui": "Opening status monitor GUI...",
     "pm.status.window_title": "PM Status Monitor",
