@@ -240,7 +240,7 @@ public class ProcessInstance {
         }
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
             String line;
-            while (running.get() && !Thread.currentThread().isInterrupted() && (line = reader.readLine()) != null) {
+            while (!Thread.currentThread().isInterrupted() && (line = reader.readLine()) != null) {
                 long now = System.currentTimeMillis();
                 String raw = line;
                 String plain = ANSITextProcessor.toPlainText(raw);
@@ -274,7 +274,7 @@ public class ProcessInstance {
         ByteArrayOutputStream lineBuf = new ByteArrayOutputStream(256);
         try {
             int n;
-            while (running.get() && !Thread.currentThread().isInterrupted() && (n = in.read(buf)) != -1) {
+            while (!Thread.currentThread().isInterrupted() && (n = in.read(buf)) != -1) {
                 if (n == 0) continue;
                 notifyConsoleOutput(buf, n);
                 for (int i = 0; i < n; i++) {
@@ -378,6 +378,7 @@ public class ProcessInstance {
     }
 
     private void handleProcessExit(int exitCode) {
+        awaitOutputReader();
         notifyConsoleClosed(exitCode);
         boolean normalExit;
         if ("gracefulStop".equalsIgnoreCase(config.exitDetectionMode)) {
@@ -402,6 +403,22 @@ public class ProcessInstance {
         } else {
             closeLogger();
             sendInstanceRemovedPacket();
+        }
+    }
+
+    private void awaitOutputReader() {
+        ExecutorService reader;
+        processLock.readLock().lock();
+        try {
+            reader = outputReaderExecutor;
+        } finally {
+            processLock.readLock().unlock();
+        }
+        if (reader == null) return;
+        try {
+            reader.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 

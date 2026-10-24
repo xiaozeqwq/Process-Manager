@@ -9,6 +9,7 @@ import com.xiaoze_qwq_.processmanager.*;
 import com.xiaoze_qwq_.processmanager.config.Config;
 import com.xiaoze_qwq_.processmanager.network.CookieGrantPacket;
 import com.xiaoze_qwq_.processmanager.network.OpenStatusScreenPacket;
+import com.xiaoze_qwq_.processmanager.ssh.SshServerHost;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
@@ -123,9 +124,6 @@ public class CommandRegistry {
                         .executes(ctx -> executeSshStatus(ctx, getInstanceId(ctx)))
                         .then(Commands.literal("enable").executes(ctx -> executeSshEnable(ctx, getInstanceId(ctx))))
                         .then(Commands.literal("disable").executes(ctx -> executeSshDisable(ctx, getInstanceId(ctx))))
-                        .then(Commands.literal("setuser")
-                                .then(Commands.argument("user", StringArgumentType.word())
-                                        .executes(ctx -> executeSshSetUser(ctx, getInstanceId(ctx)))))
                         .then(Commands.literal("setpassword")
                                 .then(Commands.argument("password", StringArgumentType.greedyString())
                                         .executes(ctx -> executeSshSetPassword(ctx, getInstanceId(ctx))))));
@@ -555,11 +553,13 @@ public class CommandRegistry {
         ProcessInstance inst = resolveInstance(ctx, id);
         if (inst == null) return 0;
         Config.InstanceConfig cfg = inst.getConfig();
-        String user = (cfg.sshUser == null || cfg.sshUser.isEmpty()) ? "(unset)" : cfg.sshUser;
         boolean hasPassword = cfg.sshPasswordHash != null && !cfg.sshPasswordHash.isEmpty();
+        boolean sshdRunning = SshServerHost.getPort() > 0;
         src.sendSuccess(() -> Component.literal(
                 "SSH for instance " + id + ": enabled=" + cfg.sshEnabled
-                        + ", user=" + user + ", password=" + (hasPassword ? "set" : "unset")), false);
+                        + ", password=" + (hasPassword ? "set" : "unset")
+                        + ", server=" + (sshdRunning ? "running" : "stopped")
+                        + ", sessions=" + SshServerHost.getActiveSessionCount()), false);
         return 1;
     }
 
@@ -569,17 +569,31 @@ public class CommandRegistry {
         ProcessInstance inst = resolveInstance(ctx, id);
         if (inst == null) return 0;
         Config.InstanceConfig cfg = inst.getConfig();
-        if (cfg.sshUser == null || cfg.sshUser.isEmpty()) {
-            src.sendFailure(Component.literal("Set an SSH username first: /pm " + id + " ssh setuser <user>"));
-            return 0;
-        }
         if (cfg.sshPasswordHash == null || cfg.sshPasswordHash.isEmpty()) {
             src.sendFailure(Component.literal("Set an SSH password first: /pm " + id + " ssh setpassword <password>"));
             return 0;
         }
-        Config.setInstanceField(id, "sshEnabled", true);
-        ProcessManager.ensureEmbeddedSsh();
-        src.sendSuccess(() -> Component.literal("SSH enabled for instance " + id + " (user: " + cfg.sshUser + ")."), false);
+        if (inst.isRunning() || !inst.canStartNewOperation()) {
+            src.sendFailure(Component.literal("Stop the instance before enabling SSH."));
+            return 0;
+        }
+        Config.InstanceConfig enabled = Config.getSshEnabledInstance();
+        if (enabled != null && !enabled.id.equals(id)) {
+            src.sendFailure(Component.literal("SSH is already enabled for instance " + enabled.id + ". Disable it first."));
+            return 0;
+        }
+        if (!Config.setInstanceSshEnabled(id, true)) {
+            src.sendFailure(Component.literal("Failed to enable SSH for instance " + id + "."));
+            return 0;
+        }
+        ProcessManager.applySshConfigurationChange();
+        if (SshServerHost.getPort() <= 0) {
+            Config.setInstanceSshEnabled(id, false);
+            src.sendFailure(Component.literal("SSH server failed to start. Check the server log."));
+            return 0;
+        }
+        src.sendSuccess(() -> Component.literal(
+                "SSH enabled for instance " + id + ". Connect with: ssh -p <mc-port> <any-username>@<host>"), false);
         return 1;
     }
 
@@ -588,27 +602,16 @@ public class CommandRegistry {
         if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
         ProcessInstance inst = resolveInstance(ctx, id);
         if (inst == null) return 0;
-        Config.setInstanceField(id, "sshEnabled", false);
-        src.sendSuccess(() -> Component.literal("SSH disabled for instance " + id + "."), false);
-        return 1;
-    }
-
-    private static int executeSshSetUser(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
-        var src = ctx.getSource();
-        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
-        ProcessInstance inst = resolveInstance(ctx, id);
-        if (inst == null) return 0;
-        String user = StringArgumentType.getString(ctx, "user");
-        if (user.isEmpty()) {
-            src.sendFailure(Component.literal("Username cannot be empty."));
+        if (inst.isRunning() || !inst.canStartNewOperation()) {
+            src.sendFailure(Component.literal("Stop the instance before disabling SSH."));
             return 0;
         }
-        if (Config.isSshUserTaken(user, id)) {
-            src.sendFailure(Component.literal("SSH username '" + user + "' is already used by another instance."));
-            return 0;
+        boolean wasEnabled = inst.getConfig().sshEnabled;
+        Config.setInstanceSshEnabled(id, false);
+        if (wasEnabled) {
+            ProcessManager.applySshConfigurationChange();
         }
-        Config.setInstanceField(id, "sshUser", user);
-        src.sendSuccess(() -> Component.literal("SSH username for instance " + id + " set to '" + user + "'."), false);
+        src.sendSuccess(() -> Component.literal("SSH disabled for instance " + id + ". All SSH sessions closed."), false);
         return 1;
     }
 
@@ -626,13 +629,16 @@ public class CommandRegistry {
         ProcessInstance inst = resolveInstance(ctx, id);
         if (inst == null) return 0;
         String password = StringArgumentType.getString(ctx, "password");
-        if (password.isEmpty()) {
-            src.sendFailure(Component.literal("Password cannot be empty."));
+        if (password.length() < 12 || password.length() > 64 || password.trim().isEmpty()) {
+            src.sendFailure(Component.literal("SSH password must be 12-64 characters and cannot be blank."));
             return 0;
         }
         if (!Config.setInstanceSshPassword(id, password)) {
             src.sendFailure(Component.literal("Failed to set SSH password."));
             return 0;
+        }
+        if (inst.getConfig().sshEnabled) {
+            ProcessManager.disconnectSshSessions();
         }
         src.sendSuccess(() -> Component.literal("SSH password for instance " + id + " has been set (bcrypt)."), false);
         return 1;
