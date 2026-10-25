@@ -79,7 +79,6 @@ jobs:
           mkdir -p dist
           cp "fabric/build/libs/${MOD_ID}-${VERSION}.jar" "dist/${MOD_ID}-${VERSION}-fabric.jar"
           cp "fabric/build/libs/${MOD_ID}-${VERSION}-thin.jar" "dist/${MOD_ID}-${VERSION}-fabric-thin.jar"
-          cp "fabric/build/libs/${MOD_ID}-${VERSION}-dep.jar" "dist/${MOD_ID}-${VERSION}-fabric-dep.jar"
 
       - name: Upload Fabric jar
         uses: actions/upload-artifact@v4
@@ -127,7 +126,8 @@ jobs:
           mkdir -p dist
           cp "neoforge/build/libs/${MOD_ID}-${VERSION}.jar" "dist/${MOD_ID}-${VERSION}-neoforge.jar"
           cp "neoforge/build/libs/${MOD_ID}-${VERSION}-thin.jar" "dist/${MOD_ID}-${VERSION}-neoforge-thin.jar"
-          cp "neoforge/build/libs/${MOD_ID}-${VERSION}-dep.jar" "dist/${MOD_ID}-${VERSION}-neoforge-dep.jar"
+          cp neoforge/build/jna-deps/jna-[0-9]*.jar dist/
+          cp neoforge/build/jna-deps/jna-platform-*.jar dist/
 
       - name: Upload NeoForge jar
         uses: actions/upload-artifact@v4

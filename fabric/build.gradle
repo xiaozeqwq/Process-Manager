@@ -14,6 +14,7 @@ loom {
 configurations {
     common
     shadowCommon
+    jnaDeps
     compileClasspath.extendsFrom common
     runtimeClasspath.extendsFrom common
     developmentFabric.extendsFrom common
@@ -48,6 +49,9 @@ dependencies {
     }
     implementation 'at.favre.lib:bcrypt:0.10.2'
     shadow 'at.favre.lib:bcrypt:0.10.2'
+
+    jnaDeps 'net.java.dev.jna:jna:5.12.1'
+    jnaDeps 'net.java.dev.jna:jna-platform:5.12.1'
 }
 
 def replaceProperties = [
@@ -103,41 +107,33 @@ jar {
 }
 
 
-def registerVariantJar = { String variant, boolean declareJna ->
-    def stagingDir = layout.buildDirectory.dir("variant-${variant}")
-    def stage = tasks.register("${variant}JarStage", Copy) {
-        dependsOn remapJar
-        from({ zipTree(remapJar.archiveFile.get().asFile) }) {
-            exclude 'com/sun/jna/**'
-            exclude 'META-INF/versions/**/com/sun/jna/**'
-        }
-        into(stagingDir)
-        doLast {
-            if (!declareJna) return
-            def metaFile = new File(stagingDir.get().asFile, 'fabric.mod.json')
-            def meta = new groovy.json.JsonSlurper().parse(metaFile)
-            def depends = (meta.depends instanceof Map) ? new LinkedHashMap(meta.depends) : new LinkedHashMap()
-            depends['jna'] = '*'
-            meta.depends = depends
-            metaFile.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(meta))
-        }
+def thinStagingDir = layout.buildDirectory.dir('variant-thin')
+def thinStage = tasks.register('thinJarStage', Copy) {
+    dependsOn remapJar
+    from({ zipTree(remapJar.archiveFile.get().asFile) }) {
+        exclude 'com/sun/jna/**'
+        exclude 'META-INF/versions/**/com/sun/jna/**'
     }
-    tasks.register("${variant}Jar", Zip) {
-        dependsOn stage
-        archiveBaseName = rootProject.mod_id
-        archiveVersion = rootProject.mod_version
-        archiveClassifier = variant
-        archiveExtension = 'jar'
-        destinationDirectory = layout.buildDirectory.dir('libs')
-        from(stagingDir)
-    }
+    into(thinStagingDir)
 }
 
-def thinJar = registerVariantJar('thin', false)
-def depJar = registerVariantJar('dep', true)
+def thinJar = tasks.register('thinJar', Zip) {
+    dependsOn thinStage
+    archiveBaseName = rootProject.mod_id
+    archiveVersion = rootProject.mod_version
+    archiveClassifier = 'thin'
+    archiveExtension = 'jar'
+    destinationDirectory = layout.buildDirectory.dir('libs')
+    from(thinStagingDir)
+}
+
+tasks.register('copyJnaDeps', Copy) {
+    from configurations.jnaDeps
+    into layout.buildDirectory.dir('jna-deps')
+}
 
 tasks.named('assemble').configure {
-    dependsOn remapJar, thinJar, depJar
+    dependsOn remapJar, thinJar, copyJnaDeps
 }
 
 components.java {

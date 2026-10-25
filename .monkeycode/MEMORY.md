@@ -75,15 +75,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - 版本提升后通过 GitHub Actions 重新构建，并发布对应版本 tag 的 Release
   - 禁止复用已存在的版本号发布新构建，避免 Release tag 指向旧提交
 
-[模组构建必须提供 fat/thin/dep 三种变体]
+[模组构建必须提供 fat/thin 两种变体及 JNA 依赖包]
 - Date: 2026-10-25
-- Context: 用户报告模组内置 JNA 与整合包内其他模组发生 NeoForge 模块包冲突；1.0.4 仅重定位 jna-platform 后仍崩溃
+- Context: 用户报告模组内置 JNA 与整合包内其他模组发生 NeoForge 模块包冲突；1.0.4 仍报 `com.sun.jna.internal` 冲突
 - Category: Build Methods
 - Instructions:
-  - 每个加载器（Fabric、NeoForge）构建 3 个变体：fat、thin、dep
+  - 每个加载器（Fabric、NeoForge）构建 fat、thin 两个 JAR，并额外发布 `jna`、`jna-platform` 两个依赖包，共 6 个发布文件
   - fat：完整打包 JNA、jna-platform、pty4j，面向无 JNA 冲突的纯净服
-  - thin：排除 `com/sun/jna/**` 与 `META-INF/versions/**/com/sun/jna/**`，保留 pty4j，不声明依赖，由用户自行提供 JNA
-  - dep：同 thin，但在 `fabric.mod.json` / `neoforge.mods.toml` 中声明依赖 mod id `jna`
+  - thin：排除 `com/sun/jna/**` 与 `META-INF/versions/**/com/sun/jna/**`，保留 pty4j，不声明依赖，由用户手动放入 JNA 包
   - 不要重定位 `com.sun.jna`：JNA 原生库硬编码 `Java_com_sun_jna_Native_*` 符号和 `com/sun/jna/...` 类名，重定位会导致 `UnsatisfiedLinkError`
   - 不要重定位 `com.pty4j` 或 `resources/com/pty4j/native`：pty4j 原生资源路径同样硬编码
   - 其余 bundled 第三方包仍需重定位（sshd/commons/toml/gson/bcrypt/annotations 等）
