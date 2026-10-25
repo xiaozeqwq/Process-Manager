@@ -106,3 +106,12 @@ Entries discovered by the Agent during task execution should follow this format:
   - 不要从 pty4j 依赖中排除 purejavacomm；需在 fabric/neoforge 的 implementation 与 shadow 中都显式声明 `org.jetbrains.pty4j:purejavacomm:0.0.11.1`
   - 该构件只在 JetBrains 仓库 `https://packages.jetbrains.team/maven/p/ij/intellij-dependencies`，根 build.gradle 必须添加该仓库
   - purejavacomm/jtermios 不要重定位，pty4j 直接按包名引用
+
+[内嵌 SSH 主机密钥使用 EC，不要用 Ed25519]
+- Date: 2026-10-25
+- Context: 客户端连接报 `getKexProposal() no resolved signatures available`
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - Apache MINA sshd 2.13.2 的 Ed25519 支持依赖可选的 `net.i2p.crypto:eddsa`，未打包时服务端无法提供签名算法
+  - 主机密钥改用 `EC`（P-256）或 RSA；不要设置 `Ed25519`
+  - 更换主机密钥算法时必须更换密钥文件名（如 `pm_ssh_hostkey_ec.ser`），否则会继续加载旧算法密钥

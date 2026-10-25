@@ -95,7 +95,7 @@ public final class SshServerHost {
     }
 
     private void doStart() throws IOException {
-        Path hostKey = Platform.getConfigFolder().resolve("pm_ssh_hostkey.ser");
+        Path hostKey = Platform.getConfigFolder().resolve("pm_ssh_hostkey_ec.ser");
 
         sshd = SshServer.setUpDefaultServer();
         sshd.setHost("127.0.0.1");
@@ -133,7 +133,8 @@ public final class SshServerHost {
 
     private SimpleGeneratorHostKeyProvider createHostKeyProvider(Path hostKey) {
         SimpleGeneratorHostKeyProvider provider = new SimpleGeneratorHostKeyProvider(hostKey);
-        provider.setAlgorithm("Ed25519");
+        provider.setAlgorithm("EC");
+        provider.setKeySize(256);
         return provider;
     }
 
