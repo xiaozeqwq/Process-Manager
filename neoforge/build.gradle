@@ -81,7 +81,6 @@ shadowJar {
     relocate 'at.favre.lib', 'com.xiaoze_qwq_.processmanager.shadow.bcrypt'
     relocate 'org.jetbrains.annotations', 'com.xiaoze_qwq_.processmanager.shadow.annotations'
     relocate 'org.intellij.lang.annotations', 'com.xiaoze_qwq_.processmanager.shadow.intellij.lang.annotations'
-    relocate 'com.sun.jna.platform', 'com.xiaoze_qwq_.processmanager.shadow.jna.platform'
     exclude 'META-INF/*.SF'
     exclude 'META-INF/*.DSA'
     exclude 'META-INF/*.RSA'
@@ -102,8 +101,38 @@ jar {
     archiveClassifier = 'dev'
 }
 
+
+def registerVariantJar = { String variant, boolean declareJna ->
+    def stagingDir = layout.buildDirectory.dir("variant-${variant}")
+    def stage = tasks.register("${variant}JarStage", Copy) {
+        dependsOn remapJar
+        from({ zipTree(remapJar.archiveFile.get().asFile) }) {
+            exclude 'com/sun/jna/**'
+            exclude 'META-INF/versions/**/com/sun/jna/**'
+        }
+        into(stagingDir)
+        doLast {
+            if (!declareJna) return
+            def metaFile = new File(stagingDir.get().asFile, 'META-INF/neoforge.mods.toml')
+            metaFile.append("\n[[dependencies.${rootProject.mod_id}]]\nmodId=\"jna\"\ntype=\"required\"\nversionRange=\"[5.12,)\"\nordering=\"NONE\"\nside=\"BOTH\"\n")
+        }
+    }
+    tasks.register("${variant}Jar", Zip) {
+        dependsOn stage
+        archiveBaseName = rootProject.mod_id
+        archiveVersion = rootProject.mod_version
+        archiveClassifier = variant
+        archiveExtension = 'jar'
+        destinationDirectory = layout.buildDirectory.dir('libs')
+        from(stagingDir)
+    }
+}
+
+def thinJar = registerVariantJar('thin', false)
+def depJar = registerVariantJar('dep', true)
+
 tasks.named('assemble').configure {
-    dependsOn remapJar
+    dependsOn remapJar, thinJar, depJar
 }
 
 components.java {
