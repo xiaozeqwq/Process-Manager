@@ -14,6 +14,7 @@ loom {
 configurations {
     common
     shadowCommon
+    jnaDeps
     compileClasspath.extendsFrom common
     runtimeClasspath.extendsFrom common
     developmentNeoForge.extendsFrom common
@@ -48,6 +49,9 @@ dependencies {
     }
     implementation 'at.favre.lib:bcrypt:0.10.2'
     shadow 'at.favre.lib:bcrypt:0.10.2'
+
+    jnaDeps 'net.java.dev.jna:jna:5.12.1'
+    jnaDeps 'net.java.dev.jna:jna-platform:5.12.1'
 }
 
 def replaceProperties = [
@@ -79,6 +83,8 @@ shadowJar {
     relocate 'com.moandjiezana.toml', 'com.xiaoze_qwq_.processmanager.shadow.toml'
     relocate 'org.apache.sshd', 'com.xiaoze_qwq_.processmanager.shadow.sshd'
     relocate 'at.favre.lib', 'com.xiaoze_qwq_.processmanager.shadow.bcrypt'
+    relocate 'org.jetbrains.annotations', 'com.xiaoze_qwq_.processmanager.shadow.annotations'
+    relocate 'org.intellij.lang.annotations', 'com.xiaoze_qwq_.processmanager.shadow.intellij.lang.annotations'
     exclude 'META-INF/*.SF'
     exclude 'META-INF/*.DSA'
     exclude 'META-INF/*.RSA'
@@ -99,8 +105,34 @@ jar {
     archiveClassifier = 'dev'
 }
 
-tasks.named('assemble').configure {
+
+def thinStagingDir = layout.buildDirectory.dir('variant-thin')
+def thinStage = tasks.register('thinJarStage', Copy) {
     dependsOn remapJar
+    from({ zipTree(remapJar.archiveFile.get().asFile) }) {
+        exclude 'com/sun/jna/**'
+        exclude 'META-INF/versions/**/com/sun/jna/**'
+    }
+    into(thinStagingDir)
+}
+
+def thinJar = tasks.register('thinJar', Zip) {
+    dependsOn thinStage
+    archiveBaseName = rootProject.mod_id
+    archiveVersion = rootProject.mod_version
+    archiveClassifier = 'thin'
+    archiveExtension = 'jar'
+    destinationDirectory = layout.buildDirectory.dir('libs')
+    from(thinStagingDir)
+}
+
+tasks.register('copyJnaDeps', Copy) {
+    from configurations.jnaDeps
+    into layout.buildDirectory.dir('jna-deps')
+}
+
+tasks.named('assemble').configure {
+    dependsOn remapJar, thinJar, copyJnaDeps
 }
 
 components.java {
