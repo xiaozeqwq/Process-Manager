@@ -40,11 +40,12 @@ Entries discovered by the Agent during task execution should follow this format:
   - 用户明确要求将此类行为指令持续记录到 `.monkeycode/MEMORY.md`
 
 [编译使用 GitHub Actions]
-- Date: 2026-10-11
+- Date: 2026-10-11（2026-10-25 补充触发条件）
 - Context: 用户指出本项目的编译验证一贯通过 GitHub Actions 完成
 - Instructions:
   - 不要在本机安装 JDK 或执行本地 gradle 构建
   - 编译验证通过 push 分支并触发 GitHub Actions workflow 完成
+  - `.github/workflows/build.yml` 仅在 push 到 `master`/`main` 或 `pull_request` 时触发；功能分支需要创建 PR 才会运行 CI
   - workflow 中的 jar 名等应从 gradle.properties 动态读取（如 mod_id、mod_version），避免硬编码
 
 [部署环境只开放单个端口]
