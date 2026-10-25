@@ -31,11 +31,19 @@ public class InstanceManager {
 
     public void reloadInstances() {
         Map<String, ProcessInstance> oldInstances = new HashMap<>(instances);
+        Config.InstanceConfig previousSshInstance = Config.getSshEnabledInstance();
+        String previousSshInstanceId = previousSshInstance == null ? null : previousSshInstance.id;
         Config.load();
         Collection<Config.InstanceConfig> newConfigs = Config.getAllInstances();
+        boolean sshReverted = false;
         for (Config.InstanceConfig cfg : newConfigs) {
             ProcessInstance existing = oldInstances.get(cfg.id);
             if (existing != null) {
+                if (existing.isRunning() && existing.getConfig().sshEnabled != cfg.sshEnabled) {
+                    ProcessManager.LOGGER.warn("[{}] SSH mode cannot change while the process is running; keeping the previous value. Stop the instance first.", cfg.id);
+                    cfg.sshEnabled = existing.getConfig().sshEnabled;
+                    sshReverted = true;
+                }
                 existing.updateConfig(cfg);
                 oldInstances.remove(cfg.id);
             } else {
@@ -54,6 +62,14 @@ public class InstanceManager {
         for (ProcessInstance removed : oldInstances.values()) {
             instances.remove(removed.getId());
             removed.stop(true);
+        }
+        if (sshReverted) {
+            Config.save();
+        }
+        Config.InstanceConfig currentSshInstance = Config.getSshEnabledInstance();
+        String currentSshInstanceId = currentSshInstance == null ? null : currentSshInstance.id;
+        if (!Objects.equals(previousSshInstanceId, currentSshInstanceId)) {
+            ProcessManager.applySshConfigurationChange();
         }
     }
 

@@ -94,14 +94,44 @@ public class ProcessManager {
                 LOGGER.warn("No Minecraft listener channels found; embedded SSH server not installed.");
                 return;
             }
-            LOGGER.info("Embedded SSH server multiplexed over the Minecraft port. Connect with: ssh -p <mc-port> <ssh-user>@<host>");
+            LOGGER.info("Embedded SSH server multiplexed over the Minecraft port. Log in with any username and the instance SSH password.");
         } catch (Throwable t) {
             LOGGER.error("Failed to start embedded SSH server", t);
+            try {
+                if (server.getConnection() != null) {
+                    ListenerHook.uninstall(server.getConnection());
+                }
+            } catch (Throwable cleanup) {
+                LOGGER.warn("Failed to uninstall SSH listener after startup failure", cleanup);
+            }
+            try {
+                SshServerHost.stop();
+            } catch (Throwable cleanup) {
+                LOGGER.warn("Failed to clean up embedded SSH server after startup failure", cleanup);
+            }
         }
     }
 
     private static void stopEmbeddedSsh() {
+        MinecraftServer server = serverInstance;
+        if (server != null && server.getConnection() != null) {
+            ListenerHook.uninstall(server.getConnection());
+        }
         SshServerHost.stop();
+    }
+
+    /** 在实例 SSH 配置发生变化后调用：先彻底停掉旧 sshd 与旧会话，再按新配置决定是否启动。 */
+    public static boolean applySshConfigurationChange() {
+        MinecraftServer server = serverInstance;
+        if (server == null) return false;
+        stopEmbeddedSsh();
+        if (!Config.hasConfiguredSshInstance()) return true;
+        ensureEmbeddedSsh();
+        return SshServerHost.getPort() > 0;
+    }
+
+    public static void disconnectSshSessions() {
+        SshServerHost.disconnectAllSessions();
     }
 
     /** 在实例 SSH 配置发生变化后调用：若已有实例启用 SSH 而服务端尚未启动，则懒启动。 */

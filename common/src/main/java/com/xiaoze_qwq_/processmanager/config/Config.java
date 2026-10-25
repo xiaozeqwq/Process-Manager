@@ -221,6 +221,7 @@ public class Config {
     public static boolean setInstanceSshPassword(String id, String plain) {
         InstanceConfig cfg = instances.get(id);
         if (cfg == null || plain == null || plain.isEmpty()) return false;
+        if (plain.length() < 12 || plain.length() > 64 || plain.trim().isEmpty()) return false;
         cfg.sshPasswordHash = bcryptHash(plain);
         saveToml();
         return true;
@@ -231,6 +232,7 @@ public class Config {
         InstanceConfig cfg = instances.get(id);
         if (cfg == null) return;
         cfg.sshPasswordHash = "";
+        cfg.sshEnabled = false;
         saveToml();
     }
 
@@ -241,34 +243,56 @@ public class Config {
         return bcryptVerify(plain, cfg.sshPasswordHash);
     }
 
-    /** SSH 用户名是否已被其他实例占用（不区分大小写）。 */
-    public static boolean isSshUserTaken(String user, String exceptId) {
-        if (user == null || user.isEmpty()) return false;
-        for (InstanceConfig cfg : instances.values()) {
-            if (cfg.id != null && cfg.id.equals(exceptId)) continue;
-            if (cfg.sshUser != null && cfg.sshUser.equalsIgnoreCase(user)) return true;
-        }
-        return false;
-    }
-
-    /** 是否存在已开启并配置完整的 SSH 实例（启用 + 用户名 + 密码）。 */
-    public static boolean hasConfiguredSshInstance() {
-        for (InstanceConfig cfg : instances.values()) {
-            if (cfg.sshEnabled && cfg.sshUser != null && !cfg.sshUser.isEmpty()
-                    && cfg.sshPasswordHash != null && !cfg.sshPasswordHash.isEmpty()) {
-                return true;
+    /**
+     * 启用或停用某实例的 SSH。全局只允许一个实例启用；启用前必须已设置密码。
+     */
+    public static boolean setInstanceSshEnabled(String id, boolean enabled) {
+        InstanceConfig cfg = instances.get(id);
+        if (cfg == null) return false;
+        if (enabled) {
+            if (cfg.sshPasswordHash == null || cfg.sshPasswordHash.isEmpty()) return false;
+            for (InstanceConfig other : instances.values()) {
+                if (!id.equals(other.id) && other.sshEnabled) return false;
             }
         }
-        return false;
+        cfg.sshEnabled = enabled;
+        saveToml();
+        return true;
     }
 
-    /** 按 SSH 用户名查找实例。 */
-    public static InstanceConfig findInstanceBySshUser(String user) {
-        if (user == null) return null;
+    /**
+     * 返回唯一启用 SSH 的实例；未启用或同时启用多个时返回 null（fail-closed）。
+     */
+    public static InstanceConfig getSshEnabledInstance() {
+        InstanceConfig found = null;
+        int count = 0;
         for (InstanceConfig cfg : instances.values()) {
-            if (cfg.sshUser != null && cfg.sshUser.equals(user)) return cfg;
+            if (cfg.sshEnabled) {
+                found = cfg;
+                count++;
+            }
         }
-        return null;
+        return count == 1 ? found : null;
+    }
+
+    /** 是否存在已开启并配置完整（启用 + 密码）的 SSH 实例。 */
+    public static boolean hasConfiguredSshInstance() {
+        InstanceConfig cfg = getSshEnabledInstance();
+        if (cfg == null) return false;
+        return cfg.sshPasswordHash != null && !cfg.sshPasswordHash.isEmpty();
+    }
+
+    /** 加载配置时强制单实例约束：发现多个启用 SSH 的实例则全部停用。 */
+    private static void enforceSingleSshInstance() {
+        int count = 0;
+        for (InstanceConfig cfg : instances.values()) {
+            if (cfg.sshEnabled) count++;
+        }
+        if (count <= 1) return;
+        for (InstanceConfig cfg : instances.values()) {
+            cfg.sshEnabled = false;
+        }
+        ProcessManager.LOGGER.error("Multiple instances have SSH enabled. SSH has been disabled for all instances; enable exactly one instance.");
     }
 
     // ==================== 配置数据类 ====================
@@ -301,11 +325,9 @@ public class Config {
         public String outputTimeFormat = "HH:mm:ss";
         public int chartMaxPoints = 60;
 
-        /** 是否允许该实例通过 SSH 接入其控制台（与 Minecraft 共用端口）。 */
+        /** 是否允许该实例通过 SSH 接入其控制台（与 Minecraft 共用端口）。全局仅允许一个实例启用。 */
         public boolean sshEnabled = false;
-        /** SSH 登录用户名（全局唯一，不区分大小写）。 */
-        public String sshUser = "";
-        /** SSH 密码的 bcrypt ($2b$) 哈希，加密保存，不存明文。 */
+        /** SSH 密码的 bcrypt ($2b$) 哈希，加密保存，不存明文。用户名由客户端任意填写并被忽略。 */
         public String sshPasswordHash = "";
     }
 
@@ -389,6 +411,7 @@ public class Config {
                 }
             }
 
+            enforceSingleSshInstance();
             saveToml();
             loadPasswordHash();
         } catch (Exception e) {
@@ -432,10 +455,11 @@ public class Config {
         cfg.chartMaxPoints = table.getLong("chartMaxPoints", 60L).intValue();
         if (cfg.chartMaxPoints < 10) cfg.chartMaxPoints = 60;
         cfg.sshEnabled = table.getBoolean("sshEnabled", false);
-        String sshUserValue = table.getString("sshUser", "");
-        cfg.sshUser = sshUserValue == null ? "" : sshUserValue;
         String sshHashValue = table.getString("sshPasswordHash", "");
         cfg.sshPasswordHash = sshHashValue == null ? "" : sshHashValue;
+        if (table.getString("sshUser") != null) {
+            ProcessManager.LOGGER.warn("Instance '{}' contains deprecated field 'sshUser' which is ignored.", fallbackId);
+        }
         if (table.getString("executablePath") != null || table.toMap().containsKey("arguments")) {
             ProcessManager.LOGGER.warn("Instance '{}' contains deprecated fields 'executablePath'/'arguments' which are ignored. Use 'command' instead.", fallbackId);
         }
@@ -481,11 +505,14 @@ public class Config {
         if (cfg.historyLimit <= 0) cfg.historyLimit = defaults.historyLimit;
         if (cfg.exitCode < 0) cfg.exitCode = defaults.exitCode;
         if (cfg.maxArchives <= 0) cfg.maxArchives = defaults.maxArchives;
-        if (cfg.sshUser == null) cfg.sshUser = "";
         if (cfg.sshPasswordHash == null) cfg.sshPasswordHash = "";
     }
 
     // ==================== 保存（全部交给 TomlWriter） ====================
+    public static void save() {
+        saveToml();
+    }
+
     private static void saveToml() {
         try {
             Map<String, Object> root = new LinkedHashMap<>();
@@ -511,6 +538,7 @@ public class Config {
                 Files.createDirectories(CONFIG_PATH.getParent());
             }
             Files.write(CONFIG_PATH, content.getBytes(StandardCharsets.UTF_8));
+            setFilePermissions600(CONFIG_PATH);
         } catch (IOException e) {
             ProcessManager.LOGGER.error("Failed to save pm_config.toml", e);
         }
@@ -544,7 +572,6 @@ public class Config {
         m.put("outputTimeFormat", cfg.outputTimeFormat);
         m.put("chartMaxPoints", (long) cfg.chartMaxPoints);
         m.put("sshEnabled", cfg.sshEnabled);
-        m.put("sshUser", cfg.sshUser == null ? "" : cfg.sshUser);
         m.put("sshPasswordHash", cfg.sshPasswordHash == null ? "" : cfg.sshPasswordHash);
         return m;
     }
@@ -575,8 +602,6 @@ public class Config {
             case "outputAlone": cfg.outputAlone = (boolean) value; break;
             case "outputWithTime": cfg.outputWithTime = (boolean) value; break;
             case "outputTimeFormat": cfg.outputTimeFormat = (String) value; break;
-            case "sshEnabled": cfg.sshEnabled = (boolean) value; break;
-            case "sshUser": cfg.sshUser = value == null ? "" : (String) value; break;
             case "sshPasswordHash": cfg.sshPasswordHash = value == null ? "" : (String) value; break;
         }
         saveToml();

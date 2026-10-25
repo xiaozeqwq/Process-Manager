@@ -42,6 +42,21 @@ public final class ListenerHook {
         return installed;
     }
 
+    public static void uninstall(ServerConnectionListener listener) {
+        List<ChannelFuture> channels = listener.channels;
+        if (channels == null) return;
+        for (ChannelFuture future : channels) {
+            Channel serverChannel = future.channel();
+            if (serverChannel == null) continue;
+            if (serverChannel.pipeline().get(INSTALLER_NAME) != null) {
+                try {
+                    serverChannel.pipeline().remove(INSTALLER_NAME);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
     private static String findAcceptorName(Channel serverChannel) {
         for (Map.Entry<String, ChannelHandler> entry : serverChannel.pipeline()) {
             if (entry.getValue().getClass().getName().equals(ACCEPTOR_CLASS)) {
