@@ -74,3 +74,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - 每次修改合入 `master` 前必须提升 `gradle.properties` 中的 `mod_version`
   - 版本提升后通过 GitHub Actions 重新构建，并发布对应版本 tag 的 Release
   - 禁止复用已存在的版本号发布新构建，避免 Release tag 指向旧提交
+
+[模组 fat jar 必须隔离所有第三方依赖]
+- Date: 2026-10-25
+- Context: 用户报告服务器启动时因模组内置 JNA 未重定位导致模块包冲突
+- Category: Build Methods
+- Instructions:
+  - `shadowJar` 必须重定位所有 bundled 第三方包，至少包括 `com.sun.jna`、`com.pty4j`、`org.jetbrains.annotations`、`org.intellij.lang.annotations` 及已有的 sshd/commons/toml/gson/bcrypt
+  - pty4j 原生库资源路径 `resources/com/pty4j/native` 也必须通过 Shadow relocate 改写，避免与其他模组共享同名资源
+  - JNA 原生库位于 `com/sun/jna/<os>-<arch>/`，随包名 relocate 一起改写
+  - 新增依赖后先检查产物中是否仍存在未重定位的第三方包根目录
