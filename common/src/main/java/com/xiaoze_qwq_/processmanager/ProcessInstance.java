@@ -7,6 +7,9 @@ import com.xiaoze_qwq_.processmanager.network.*;
 import com.xiaoze_qwq_.processmanager.util.ANSITextProcessor;
 import com.xiaoze_qwq_.processmanager.util.LogEntry;
 import com.xiaoze_qwq_.processmanager.util.RingBuffer;
+import com.pty4j.PtyProcess;
+import com.pty4j.PtyProcessBuilder;
+import com.pty4j.WinSize;
 import dev.architectury.networking.NetworkManager;
 import net.minecraft.server.level.ServerPlayer;
 import org.slf4j.Logger;
@@ -53,7 +56,9 @@ public class ProcessInstance {
 
     private Process process;
     private BufferedWriter processWriter;
+    private OutputStream processRawOutput;
     private InputStream processInputStream;
+    private boolean ptyMode = false;
     private ExecutorService outputReaderExecutor;
     private ScheduledExecutorService scheduler;
     private Thread waitForExitThread;
@@ -65,6 +70,15 @@ public class ProcessInstance {
 
     private final AtomicBoolean immersiveConsole = new AtomicBoolean(false);
     private final AtomicInteger consoleLastPrintedIndex = new AtomicInteger(0);
+
+    /** 通过 SSH 接入本实例控制台的订阅者。 */
+    public interface ConsoleOutputListener {
+        void onConsoleOutput(byte[] data, int length);
+
+        void onConsoleClosed(int exitCode);
+    }
+
+    private final Set<ConsoleOutputListener> consoleListeners = ConcurrentHashMap.newKeySet();
 
     // 当前操作状态
     private volatile OperationState operationState = OperationState.IDLE;
@@ -139,14 +153,19 @@ public class ProcessInstance {
                 workDir = new File(config.workingDirectory);
             }
 
-            ProcessBuilder pb = new ProcessBuilder(command);
-            if (workDir != null) pb.directory(workDir);
-            pb.redirectErrorStream(true);
-            config.environment.forEach(pb.environment()::put);
-
-            process = pb.start();
+            ptyMode = config.sshEnabled;
+            if (ptyMode) {
+                process = startPtyProcess(command, workDir);
+            } else {
+                ProcessBuilder pb = new ProcessBuilder(command);
+                if (workDir != null) pb.directory(workDir);
+                pb.redirectErrorStream(true);
+                config.environment.forEach(pb.environment()::put);
+                process = pb.start();
+            }
             currentPid.set(process.pid());
-            processWriter = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
+            processRawOutput = process.getOutputStream();
+            processWriter = new BufferedWriter(new OutputStreamWriter(processRawOutput, StandardCharsets.UTF_8));
             processInputStream = process.getInputStream();
             running.set(true);
 
@@ -155,7 +174,7 @@ public class ProcessInstance {
                 t.setDaemon(true);
                 return t;
             });
-            outputReaderExecutor.submit(this::readOutputLoop);
+            outputReaderExecutor.submit(ptyMode ? this::readRawOutputLoop : this::readOutputLoop);
 
             waitForExitThread = new Thread(() -> {
                 try {
@@ -196,6 +215,19 @@ public class ProcessInstance {
         }
     }
 
+    private Process startPtyProcess(List<String> command, File workDir) throws IOException {
+        Map<String, String> env = new HashMap<>(System.getenv());
+        env.putAll(config.environment);
+        env.putIfAbsent("TERM", "xterm-256color");
+        PtyProcessBuilder builder = new PtyProcessBuilder(command.toArray(new String[0]));
+        if (workDir != null) builder.setDirectory(workDir.getAbsolutePath());
+        builder.setEnvironment(env);
+        builder.setRedirectErrorStream(true);
+        builder.setInitialColumns(80);
+        builder.setInitialRows(24);
+        return builder.start();
+    }
+
     private void readOutputLoop() {
         // 仅在获取共享状态引用时加锁，读取完成后立即释放，避免长时间持有锁
         InputStream in;
@@ -229,6 +261,110 @@ public class ProcessInstance {
         }
     }
 
+    private void readRawOutputLoop() {
+        InputStream in;
+        processLock.readLock().lock();
+        try {
+            if (!running.get() || processInputStream == null) return;
+            in = processInputStream;
+        } finally {
+            processLock.readLock().unlock();
+        }
+        byte[] buf = new byte[8192];
+        ByteArrayOutputStream lineBuf = new ByteArrayOutputStream(256);
+        try {
+            int n;
+            while (running.get() && !Thread.currentThread().isInterrupted() && (n = in.read(buf)) != -1) {
+                if (n == 0) continue;
+                notifyConsoleOutput(buf, n);
+                for (int i = 0; i < n; i++) {
+                    byte b = buf[i];
+                    if (b == '\n') {
+                        emitRawLine(lineBuf.toByteArray());
+                        lineBuf.reset();
+                    } else {
+                        lineBuf.write(b);
+                    }
+                }
+            }
+            if (lineBuf.size() > 0) emitRawLine(lineBuf.toByteArray());
+        } catch (IOException e) {
+            if (running.get()) LOGGER.error("[{}] Output reader error", instanceId, e);
+        }
+    }
+
+    private void emitRawLine(byte[] bytes) {
+        if (bytes.length == 0) return;
+        int len = bytes.length;
+        if (bytes[len - 1] == '\r') len--;
+        String raw = new String(bytes, 0, len, StandardCharsets.UTF_8);
+        String plain = ANSITextProcessor.toPlainText(raw);
+        long now = System.currentTimeMillis();
+        outputRing.add(new LogEntry(raw, now));
+        processLock.readLock().lock();
+        try {
+            if (outputLogger != null) outputLogger.writeLine(plain);
+        } finally {
+            processLock.readLock().unlock();
+        }
+    }
+
+    public boolean isSshEnabled() { return config.sshEnabled; }
+
+    public void addConsoleListener(ConsoleOutputListener listener) {
+        if (listener != null) consoleListeners.add(listener);
+    }
+
+    public void removeConsoleListener(ConsoleOutputListener listener) {
+        if (listener != null) consoleListeners.remove(listener);
+    }
+
+    private void notifyConsoleOutput(byte[] data, int length) {
+        for (ConsoleOutputListener listener : consoleListeners) {
+            try {
+                listener.onConsoleOutput(data, length);
+            } catch (Exception e) {
+                LOGGER.warn("[{}] Console listener output error", instanceId, e);
+            }
+        }
+    }
+
+    public void notifyConsoleClosed(int exitCode) {
+        for (ConsoleOutputListener listener : consoleListeners) {
+            try {
+                listener.onConsoleClosed(exitCode);
+            } catch (Exception e) {
+                LOGGER.warn("[{}] Console listener close error", instanceId, e);
+            }
+        }
+        consoleListeners.clear();
+    }
+
+    public boolean writeRawInput(byte[] data) {
+        OutputStream out = processRawOutput;
+        if (!running.get() || out == null || data == null || data.length == 0) return false;
+        try {
+            out.write(data);
+            out.flush();
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    public boolean resizeConsole(int columns, int rows) {
+        if (columns <= 0 || rows <= 0) return false;
+        Process p = process;
+        if (!(p instanceof PtyProcess pty)) return false;
+        try {
+            pty.setWinSize(new WinSize(columns, rows));
+            return true;
+        } catch (Exception e) {
+            LOGGER.warn("[{}] Failed to resize PTY", instanceId, e);
+            return false;
+        }
+    }
+
     private void killPreviousProcess() {
         long pid = currentPid.get();
         if (pid > 0) {
@@ -242,6 +378,7 @@ public class ProcessInstance {
     }
 
     private void handleProcessExit(int exitCode) {
+        notifyConsoleClosed(exitCode);
         boolean normalExit;
         if ("gracefulStop".equalsIgnoreCase(config.exitDetectionMode)) {
             long sentAt = gracefulStopSentAt;
@@ -287,6 +424,8 @@ public class ProcessInstance {
                 try { processWriter.close(); } catch (IOException ignored) {}
                 processWriter = null;
             }
+            processRawOutput = null;
+            ptyMode = false;
             process = null;
             waitForExitThread = null;
             currentPid.set(-1);
@@ -436,6 +575,10 @@ public class ProcessInstance {
 
     // ==================== 输出订阅 ====================
     public void addImmersiveSubscriber(ServerPlayer player, boolean canInput) {
+        if (config.sshEnabled) {
+            ProcessManager.sendToPlayer(player, new ImmersiveStatusPacket(instanceId, false, false));
+            return;
+        }
         immersiveSubscribers.put(player, canInput);
         List<LogEntry> history = outputRing.getLast(Math.min(200, outputRing.size()));
         for (LogEntry entry : history) {
@@ -501,10 +644,13 @@ public class ProcessInstance {
 
     // ==================== 控制台沉浸模式 ====================
     public void setImmersiveConsole(boolean enabled) {
+        if (config.sshEnabled) return;
         if (immersiveConsole.compareAndSet(!enabled, enabled)) {
             if (enabled) printHistoryToConsole();
         }
     }
+
+    public boolean isImmersiveAvailable() { return !config.sshEnabled; }
 
     public boolean isImmersiveConsole() { return immersiveConsole.get(); }
 
@@ -588,7 +734,7 @@ public class ProcessInstance {
     /**
      * 将启动命令字符串拆分为参数列表，支持单引号与双引号包裹含空格的参数。
      */
-    static List<String> tokenizeCommand(String command) {
+    public static List<String> tokenizeCommand(String command) {
         List<String> tokens = new ArrayList<>();
         if (command == null) return tokens;
         StringBuilder current = new StringBuilder();

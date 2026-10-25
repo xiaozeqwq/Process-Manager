@@ -139,8 +139,8 @@ public class StatusScreen extends Screen {
         gui.drawString(this.font, line, leftMargin, baseY, 0xCCCCCC, false);
 
         int chartStartY = baseY + 20 + 15 + 12 + 12 + 20;
-        drawChart(gui, chartStartY, dataTracker.getDownloadSpeeds(), "Download (KB/s)", 0xFF3399FF);
-        drawChart(gui, chartStartY + CHART_HEIGHT + CHART_MARGIN, dataTracker.getUploadSpeeds(), "Upload (KB/s)", 0xFFFF3333);
+        drawChart(gui, chartStartY, dataTracker.getDownloadSpeeds(), "Download (host, KB/s)", 0xFF3399FF);
+        drawChart(gui, chartStartY + CHART_HEIGHT + CHART_MARGIN, dataTracker.getUploadSpeeds(), "Upload (host, KB/s)", 0xFFFF3333);
         drawChart(gui, chartStartY + 2 * (CHART_HEIGHT + CHART_MARGIN), dataTracker.getCpuUsages(), "CPU (%)", 0xFF33FF33);
         drawChart(gui, chartStartY + 3 * (CHART_HEIGHT + CHART_MARGIN), dataTracker.getMemoryUsages(), "Memory (MB)", 0xFFFFAA33);
 

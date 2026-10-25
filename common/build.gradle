@@ -13,6 +13,14 @@ dependencies {
     compileOnly 'com.moandjiezana.toml:toml4j:0.7.2'
     compileOnly 'org.apache.commons:commons-compress:1.26.0'
     compileOnly 'commons-codec:commons-codec:1.16.0'
+    compileOnly('org.apache.sshd:sshd-core:2.13.2') {
+        exclude group: 'org.slf4j'
+    }
+    compileOnly('org.jetbrains.pty4j:pty4j:0.12.13') {
+        exclude group: 'org.jetbrains.pty4j', module: 'purejavacomm'
+        exclude group: 'org.slf4j'
+    }
+    compileOnly 'at.favre.lib:bcrypt:0.10.2'
 }
 
 processResources {

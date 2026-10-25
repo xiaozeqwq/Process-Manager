@@ -118,7 +118,17 @@ public class CommandRegistry {
                         .then(Commands.literal("help").executes(ctx -> {
                             ctx.getSource().sendSuccess(() -> Component.translatable("pm.set.help.title"), false);
                             return 1;
-                        })));
+                        })))
+                .then(Commands.literal("ssh")
+                        .executes(ctx -> executeSshStatus(ctx, getInstanceId(ctx)))
+                        .then(Commands.literal("enable").executes(ctx -> executeSshEnable(ctx, getInstanceId(ctx))))
+                        .then(Commands.literal("disable").executes(ctx -> executeSshDisable(ctx, getInstanceId(ctx))))
+                        .then(Commands.literal("setuser")
+                                .then(Commands.argument("user", StringArgumentType.word())
+                                        .executes(ctx -> executeSshSetUser(ctx, getInstanceId(ctx)))))
+                        .then(Commands.literal("setpassword")
+                                .then(Commands.argument("password", StringArgumentType.greedyString())
+                                        .executes(ctx -> executeSshSetPassword(ctx, getInstanceId(ctx))))));
 
         base.then(instanceNode);
         base.executes(CommandRegistry::executeHelp);
@@ -496,6 +506,10 @@ public class CommandRegistry {
         var player = src.getPlayer();
         ProcessInstance inst = resolveInstance(ctx, id);
         if (inst == null) return 0;
+        if (!inst.isImmersiveAvailable()) {
+            src.sendFailure(Component.translatable("pm.immersive.ssh_disabled"));
+            return 0;
+        }
         if (player == null) {
             if (inst.isImmersiveConsole()) {
                 src.sendFailure(Component.translatable("pm.immersive.already_on"));
@@ -531,7 +545,96 @@ public class CommandRegistry {
     }
 
     private static int executeInstanceHelp(CommandContext<CommandSourceStack> ctx, String id) {
-        ctx.getSource().sendSuccess(() -> Component.literal("Commands for instance " + id + ": input/start/stop/restart/forcestop/status/immersive/set"), false);
+        ctx.getSource().sendSuccess(() -> Component.literal("Commands for instance " + id + ": input/start/stop/restart/forcestop/status/immersive/ssh/set"), false);
+        return 1;
+    }
+
+    private static int executeSshStatus(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        ProcessInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        Config.InstanceConfig cfg = inst.getConfig();
+        String user = (cfg.sshUser == null || cfg.sshUser.isEmpty()) ? "(unset)" : cfg.sshUser;
+        boolean hasPassword = cfg.sshPasswordHash != null && !cfg.sshPasswordHash.isEmpty();
+        src.sendSuccess(() -> Component.literal(
+                "SSH for instance " + id + ": enabled=" + cfg.sshEnabled
+                        + ", user=" + user + ", password=" + (hasPassword ? "set" : "unset")), false);
+        return 1;
+    }
+
+    private static int executeSshEnable(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        ProcessInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        Config.InstanceConfig cfg = inst.getConfig();
+        if (cfg.sshUser == null || cfg.sshUser.isEmpty()) {
+            src.sendFailure(Component.literal("Set an SSH username first: /pm " + id + " ssh setuser <user>"));
+            return 0;
+        }
+        if (cfg.sshPasswordHash == null || cfg.sshPasswordHash.isEmpty()) {
+            src.sendFailure(Component.literal("Set an SSH password first: /pm " + id + " ssh setpassword <password>"));
+            return 0;
+        }
+        Config.setInstanceField(id, "sshEnabled", true);
+        ProcessManager.ensureEmbeddedSsh();
+        src.sendSuccess(() -> Component.literal("SSH enabled for instance " + id + " (user: " + cfg.sshUser + ")."), false);
+        return 1;
+    }
+
+    private static int executeSshDisable(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        ProcessInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        Config.setInstanceField(id, "sshEnabled", false);
+        src.sendSuccess(() -> Component.literal("SSH disabled for instance " + id + "."), false);
+        return 1;
+    }
+
+    private static int executeSshSetUser(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        ProcessInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        String user = StringArgumentType.getString(ctx, "user");
+        if (user.isEmpty()) {
+            src.sendFailure(Component.literal("Username cannot be empty."));
+            return 0;
+        }
+        if (Config.isSshUserTaken(user, id)) {
+            src.sendFailure(Component.literal("SSH username '" + user + "' is already used by another instance."));
+            return 0;
+        }
+        Config.setInstanceField(id, "sshUser", user);
+        src.sendSuccess(() -> Component.literal("SSH username for instance " + id + " set to '" + user + "'."), false);
+        return 1;
+    }
+
+    private static int executeSshSetPassword(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        if (!isConsole(src)) {
+            src.sendFailure(Component.literal("For security, set the SSH password from the server console only."));
+            return 0;
+        }
+        if (ProcessManager.isLogCommandsEnabled()) {
+            src.sendFailure(Component.translatable("pm.set.password.log_commands_warning"));
+            return 0;
+        }
+        ProcessInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        String password = StringArgumentType.getString(ctx, "password");
+        if (password.isEmpty()) {
+            src.sendFailure(Component.literal("Password cannot be empty."));
+            return 0;
+        }
+        if (!Config.setInstanceSshPassword(id, password)) {
+            src.sendFailure(Component.literal("Failed to set SSH password."));
+            return 0;
+        }
+        src.sendSuccess(() -> Component.literal("SSH password for instance " + id + " has been set (bcrypt)."), false);
         return 1;
     }
 
