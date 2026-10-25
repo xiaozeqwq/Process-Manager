@@ -87,3 +87,22 @@ Entries discovered by the Agent during task execution should follow this format:
   - 不要重定位 `com.pty4j` 或 `resources/com/pty4j/native`：pty4j 原生资源路径同样硬编码
   - 其余 bundled 第三方包仍需重定位（sshd/commons/toml/gson/bcrypt/annotations 等）
   - 新增依赖后检查 fat 与 thin 产物的包根目录，确认 thin 中不存在任何 JNA 类或原生库
+
+[NeoForge 生产环境不应用 Fabric Access Widener]
+- Date: 2026-10-25
+- Context: 1.0.6 thin 在 NeoForge 启用 SSH 时，ListenerHook 访问 ServerConnectionListener.channels 抛 IllegalAccessError
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 跨加载器访问私有成员不能只依赖 `processmanager.accesswidener`；NeoForge 生产 jar 不会把 AW 转成 AT
+  - NeoForge 侧必须在 `neoforge/src/main/resources/META-INF/accesstransformer.cfg` 单独声明，例如 `public net.minecraft.server.network.ServerConnectionListener channels`
+  - 发布前用 `unzip -l` 确认 neo jar 内存在 `META-INF/accesstransformer.cfg`
+
+[pty4j 必须附带 JetBrains purejavacomm]
+- Date: 2026-10-25
+- Context: 1.0.7 启动实例时 `NoClassDefFoundError: jtermios/JTermios`
+- Category: Build Methods
+- Instructions:
+  - pty4j 的 `com.pty4j.unix.PtyHelpers` 依赖 `jtermios`，该类位于 `org.jetbrains.pty4j:purejavacomm`
+  - 不要从 pty4j 依赖中排除 purejavacomm；需在 fabric/neoforge 的 implementation 与 shadow 中都显式声明 `org.jetbrains.pty4j:purejavacomm:0.0.11.1`
+  - 该构件只在 JetBrains 仓库 `https://packages.jetbrains.team/maven/p/ij/intellij-dependencies`，根 build.gradle 必须添加该仓库
+  - purejavacomm/jtermios 不要重定位，pty4j 直接按包名引用
