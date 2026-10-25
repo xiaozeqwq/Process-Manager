@@ -65,3 +65,12 @@ Entries discovered by the Agent during task execution should follow this format:
   - SSH 用户名完全忽略，不映射、不查询、不暴露 Linux/Windows 用户名；仅用唯一启用实例的密码认证
   - 全局同时只允许一个实例启用 SSH，启用前实例必须处于停止状态
   - 不读取系统 authorized_keys，不提供 shell、命令执行、SFTP/SCP、端口转发
+
+[每次更新必须提升版本]
+- Date: 2026-10-25
+- Context: 用户明确要求每次更新都要提升版本并重新构建
+- Category: Build Methods
+- Instructions:
+  - 每次修改合入 `master` 前必须提升 `gradle.properties` 中的 `mod_version`
+  - 版本提升后通过 GitHub Actions 重新构建，并发布对应版本 tag 的 Release
+  - 禁止复用已存在的版本号发布新构建，避免 Release tag 指向旧提交
