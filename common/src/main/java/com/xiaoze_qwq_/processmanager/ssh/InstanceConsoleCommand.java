@@ -95,7 +95,7 @@ public class InstanceConsoleCommand implements Command {
         }, Signal.WINCH);
 
         startWriter();
-        writeString("Connected to the server console.\r\n");
+        writeString("Connected to instance " + instance.getId() + " console.\r\n");
         List<String> history = instance.getRecentOutput(100);
         for (String line : history) {
             writeString(line + "\r\n");

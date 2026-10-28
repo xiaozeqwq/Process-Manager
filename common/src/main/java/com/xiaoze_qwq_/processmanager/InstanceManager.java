@@ -31,18 +31,27 @@ public class InstanceManager {
 
     public void reloadInstances() {
         Map<String, ProcessInstance> oldInstances = new HashMap<>(instances);
-        Config.InstanceConfig previousSshInstance = Config.getSshEnabledInstance();
-        String previousSshInstanceId = previousSshInstance == null ? null : previousSshInstance.id;
+        Set<String> previousSshIds = new HashSet<>();
+        for (Config.InstanceConfig cfg : Config.getSshEnabledInstances()) {
+            previousSshIds.add(cfg.id);
+        }
         Config.load();
         Collection<Config.InstanceConfig> newConfigs = Config.getAllInstances();
         boolean sshReverted = false;
         for (Config.InstanceConfig cfg : newConfigs) {
             ProcessInstance existing = oldInstances.get(cfg.id);
             if (existing != null) {
-                if (existing.isRunning() && existing.getConfig().sshEnabled != cfg.sshEnabled) {
-                    ProcessManager.LOGGER.warn("[{}] SSH mode cannot change while the process is running; keeping the previous value. Stop the instance first.", cfg.id);
-                    cfg.sshEnabled = existing.getConfig().sshEnabled;
-                    sshReverted = true;
+                if (existing.isRunning()) {
+                    Config.InstanceConfig runningConfig = existing.getConfig();
+                    boolean sshChanged = runningConfig.sshEnabled != cfg.sshEnabled;
+                    boolean authModeChanged = !Config.normalizeSshAuthMode(runningConfig.sshAuthMode)
+                            .equals(Config.normalizeSshAuthMode(cfg.sshAuthMode));
+                    if (sshChanged || authModeChanged) {
+                        ProcessManager.LOGGER.warn("[{}] SSH settings cannot change while the process is running; keeping the previous values. Stop the instance first.", cfg.id);
+                        cfg.sshEnabled = runningConfig.sshEnabled;
+                        cfg.sshAuthMode = runningConfig.sshAuthMode;
+                        sshReverted = true;
+                    }
                 }
                 existing.updateConfig(cfg);
                 oldInstances.remove(cfg.id);
@@ -66,9 +75,11 @@ public class InstanceManager {
         if (sshReverted) {
             Config.save();
         }
-        Config.InstanceConfig currentSshInstance = Config.getSshEnabledInstance();
-        String currentSshInstanceId = currentSshInstance == null ? null : currentSshInstance.id;
-        if (!Objects.equals(previousSshInstanceId, currentSshInstanceId)) {
+        Set<String> currentSshIds = new HashSet<>();
+        for (Config.InstanceConfig cfg : Config.getSshEnabledInstances()) {
+            currentSshIds.add(cfg.id);
+        }
+        if (!previousSshIds.equals(currentSshIds)) {
             ProcessManager.applySshConfigurationChange();
         }
     }
