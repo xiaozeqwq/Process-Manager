@@ -53,6 +53,9 @@ dependencies {
     implementation 'org.jetbrains.pty4j:purejavacomm:0.0.11.1'
     shadow 'org.jetbrains.pty4j:purejavacomm:0.0.11.1'
 
+    implementation 'net.i2p.crypto:eddsa:0.3.0'
+    shadow 'net.i2p.crypto:eddsa:0.3.0'
+
     jnaDeps 'net.java.dev.jna:jna:5.12.1'
     jnaDeps 'net.java.dev.jna:jna-platform:5.12.1'
 }

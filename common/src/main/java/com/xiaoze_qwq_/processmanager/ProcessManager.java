@@ -72,7 +72,7 @@ public class ProcessManager {
     }
 
     private static void startEmbeddedSsh(MinecraftServer server) {
-        if (!Config.hasConfiguredSshInstance()) {
+        if (!Config.hasEnabledSshInstance()) {
             LOGGER.info("No instance has SSH enabled; embedded SSH server not started.");
             return;
         }
@@ -94,7 +94,7 @@ public class ProcessManager {
                 LOGGER.warn("No Minecraft listener channels found; embedded SSH server not installed.");
                 return;
             }
-            LOGGER.info("Embedded SSH server multiplexed over the Minecraft port. Log in with any username and the instance SSH password.");
+            LOGGER.info("Embedded SSH server multiplexed over the Minecraft port. Log in with <instance-id-or-name> as the SSH username.");
         } catch (Throwable t) {
             LOGGER.error("Failed to start embedded SSH server", t);
             try {
@@ -120,18 +120,28 @@ public class ProcessManager {
         SshServerHost.stop();
     }
 
-    /** 在实例 SSH 配置发生变化后调用：先彻底停掉旧 sshd 与旧会话，再按新配置决定是否启动。 */
+    /** 在实例 SSH 配置发生变化后调用：按需启停 sshd，并断开已停用实例的会话。 */
     public static boolean applySshConfigurationChange() {
         MinecraftServer server = serverInstance;
         if (server == null) return false;
-        stopEmbeddedSsh();
-        if (!Config.hasConfiguredSshInstance()) return true;
+        if (!Config.hasEnabledSshInstance()) {
+            stopEmbeddedSsh();
+            return true;
+        }
+        if (SshServerHost.getPort() > 0) {
+            SshServerHost.disconnectDisabledInstances();
+            return true;
+        }
         ensureEmbeddedSsh();
         return SshServerHost.getPort() > 0;
     }
 
     public static void disconnectSshSessions() {
         SshServerHost.disconnectAllSessions();
+    }
+
+    public static void disconnectSshSessions(String instanceId) {
+        SshServerHost.disconnectInstance(instanceId);
     }
 
     /** 在实例 SSH 配置发生变化后调用：若已有实例启用 SSH 而服务端尚未启动，则懒启动。 */

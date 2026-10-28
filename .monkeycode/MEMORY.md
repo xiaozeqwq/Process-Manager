@@ -62,8 +62,9 @@ Entries discovered by the Agent during task execution should follow this format:
 - Category: Environment Configuration
 - Instructions:
   - SSH 只负责进程输出到客户端、客户端输入到进程，必须使用伪终端
-  - SSH 用户名完全忽略，不映射、不查询、不暴露 Linux/Windows 用户名；仅用唯一启用实例的密码认证
-  - 全局同时只允许一个实例启用 SSH，启用前实例必须处于停止状态
+  - SSH 用户名用于选择实例：实例编号或实例名称；未匹配任何实例时回退到可配置的默认实例，并校验该实例密码
+  - 允许多个实例同时启用 SSH；每个实例独立选择 password 或 publickey 认证，公钥存放在 config 下的 `.ssh/<实例编号>.pub`
+  - 默认实例必须使用密码认证，可通过 `/pm <实例> ssh default set` 配置
   - 不读取系统 authorized_keys，不提供 shell、命令执行、SFTP/SCP、端口转发
 
 [每次更新必须提升版本]
@@ -115,3 +116,11 @@ Entries discovered by the Agent during task execution should follow this format:
   - Apache MINA sshd 2.13.2 的 Ed25519 支持依赖可选的 `net.i2p.crypto:eddsa`，未打包时服务端无法提供签名算法
   - 主机密钥改用 `EC`（P-256）或 RSA；不要设置 `Ed25519`
   - 更换主机密钥算法时必须更换密钥文件名（如 `pm_ssh_hostkey_ec.ser`），否则会继续加载旧算法密钥
+
+[客户端公钥认证依赖 eddsa]
+- Date: 2026-10-26
+- Context: 实例切换 publickey 认证时需要解析用户的 Ed25519 公钥
+- Category: Build Methods
+- Instructions:
+  - 在 fabric/neoforge 的 implementation 与 shadow 中都声明 `net.i2p.crypto:eddsa:0.3.0`
+  - `net.i2p.crypto` 不要重定位：MINA 通过固定类名 `net.i2p.crypto.eddsa.EdDSASecurityProvider` 反射加载该提供者

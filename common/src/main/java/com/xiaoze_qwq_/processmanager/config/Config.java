@@ -21,6 +21,8 @@ public class Config {
     private static final Path CONFIG_PATH = Platform.getConfigFolder().resolve("pm_config.toml");
     private static final Path PASSWORD_FILE = Platform.getConfigFolder().resolve("pmpassword");
     private static final Path SECRET_KEY_FILE = Platform.getConfigFolder().resolve("pm_secret.key");
+    private static final Path SSH_KEYS_DIR = Platform.getConfigFolder().resolve(".ssh");
+    private static final Path SSH_DEFAULT_FILE = Platform.getConfigFolder().resolve("pm_ssh_default");
     private static volatile byte[] secretKey;
 
     private static final String PBKDF2_ALGO = "PBKDF2WithHmacSHA512";
@@ -36,6 +38,7 @@ public class Config {
 
     private static InstanceConfig defaultConfig;
     private static Map<String, InstanceConfig> instances = new ConcurrentHashMap<>();
+    private static volatile String sshDefaultInstance = null;
 
     private static volatile String passwordHash = "";
 
@@ -203,7 +206,10 @@ public class Config {
         verifyFailures.remove(uuid);
     }
 
-    // ==================== 实例 SSH 配置（bcrypt 存储） ====================
+    // ==================== 实例 SSH 配置（bcrypt / 公钥） ====================
+    public static final String SSH_AUTH_PASSWORD = "password";
+    public static final String SSH_AUTH_PUBLICKEY = "publickey";
+
     public static String bcryptHash(String plain) {
         return BCrypt.with(BCrypt.Version.VERSION_2B).hashToString(BCRYPT_COST, plain.toCharArray());
     }
@@ -217,6 +223,11 @@ public class Config {
         }
     }
 
+    public static String normalizeSshAuthMode(String mode) {
+        return SSH_AUTH_PUBLICKEY.equalsIgnoreCase(mode == null ? "" : mode.trim())
+                ? SSH_AUTH_PUBLICKEY : SSH_AUTH_PASSWORD;
+    }
+
     /** 设置某实例的 SSH 密码（bcrypt 哈希后保存到配置）。 */
     public static boolean setInstanceSshPassword(String id, String plain) {
         InstanceConfig cfg = instances.get(id);
@@ -227,12 +238,14 @@ public class Config {
         return true;
     }
 
-    /** 清除某实例的 SSH 密码。 */
+    /** 清除某实例的 SSH 密码。密码模式下同时停用 SSH。 */
     public static void clearInstanceSshPassword(String id) {
         InstanceConfig cfg = instances.get(id);
         if (cfg == null) return;
         cfg.sshPasswordHash = "";
-        cfg.sshEnabled = false;
+        if (SSH_AUTH_PASSWORD.equals(normalizeSshAuthMode(cfg.sshAuthMode))) {
+            cfg.sshEnabled = false;
+        }
         saveToml();
     }
 
@@ -243,56 +256,242 @@ public class Config {
         return bcryptVerify(plain, cfg.sshPasswordHash);
     }
 
-    /**
-     * 启用或停用某实例的 SSH。全局只允许一个实例启用；启用前必须已设置密码。
-     */
-    public static boolean setInstanceSshEnabled(String id, boolean enabled) {
+    /** 切换某实例的 SSH 认证方式：password 或 publickey。 */
+    public static boolean setInstanceSshAuthMode(String id, String mode) {
         InstanceConfig cfg = instances.get(id);
-        if (cfg == null) return false;
-        if (enabled) {
-            if (cfg.sshPasswordHash == null || cfg.sshPasswordHash.isEmpty()) return false;
-            for (InstanceConfig other : instances.values()) {
-                if (!id.equals(other.id) && other.sshEnabled) return false;
-            }
-        }
-        cfg.sshEnabled = enabled;
+        String normalized = mode == null ? "" : mode.trim().toLowerCase(Locale.ROOT);
+        if (cfg == null || !isValidSshAuthMode(normalized)) return false;
+        if (SSH_AUTH_PUBLICKEY.equals(normalized) && countSshAuthorizedKeys(id) == 0) return false;
+        if (SSH_AUTH_PUBLICKEY.equals(normalized) && isSshDefaultInstance(id)) return false;
+        if (SSH_AUTH_PASSWORD.equals(normalized)
+                && (cfg.sshPasswordHash == null || cfg.sshPasswordHash.isEmpty())) return false;
+        cfg.sshAuthMode = normalized;
         saveToml();
         return true;
     }
 
-    /**
-     * 返回唯一启用 SSH 的实例；未启用或同时启用多个时返回 null（fail-closed）。
-     */
-    public static InstanceConfig getSshEnabledInstance() {
-        InstanceConfig found = null;
-        int count = 0;
-        for (InstanceConfig cfg : instances.values()) {
-            if (cfg.sshEnabled) {
-                found = cfg;
-                count++;
-            }
-        }
-        return count == 1 ? found : null;
+    private static boolean isValidSshAuthMode(String mode) {
+        return SSH_AUTH_PASSWORD.equals(mode) || SSH_AUTH_PUBLICKEY.equals(mode);
     }
 
-    /** 是否存在已开启并配置完整（启用 + 密码）的 SSH 实例。 */
-    public static boolean hasConfiguredSshInstance() {
-        InstanceConfig cfg = getSshEnabledInstance();
+    /** 该实例是否已具备当前认证方式所需凭据。 */
+    public static boolean isSshAuthReady(InstanceConfig cfg) {
         if (cfg == null) return false;
+        if (SSH_AUTH_PUBLICKEY.equals(normalizeSshAuthMode(cfg.sshAuthMode))) {
+            return countSshAuthorizedKeys(cfg.id) > 0;
+        }
         return cfg.sshPasswordHash != null && !cfg.sshPasswordHash.isEmpty();
     }
 
-    /** 加载配置时强制单实例约束：发现多个启用 SSH 的实例则全部停用。 */
-    private static void enforceSingleSshInstance() {
-        int count = 0;
+    /**
+     * 启用或停用某实例的 SSH。支持多个实例同时启用；启用前必须已配置对应认证凭据。
+     */
+    public static boolean setInstanceSshEnabled(String id, boolean enabled) {
+        InstanceConfig cfg = instances.get(id);
+        if (cfg == null) return false;
+        if (enabled && !isSshAuthReady(cfg)) return false;
+        cfg.sshEnabled = enabled;
+        saveToml();
+        saveSshDefault();
+        return true;
+    }
+
+    /** 已启用 SSH 的实例列表。 */
+    public static List<InstanceConfig> getSshEnabledInstances() {
+        List<InstanceConfig> enabled = new ArrayList<>();
         for (InstanceConfig cfg : instances.values()) {
-            if (cfg.sshEnabled) count++;
+            if (cfg.sshEnabled) enabled.add(cfg);
         }
-        if (count <= 1) return;
+        return enabled;
+    }
+
+    /** 是否存在已开启 SSH 的实例。 */
+    public static boolean hasEnabledSshInstance() {
         for (InstanceConfig cfg : instances.values()) {
-            cfg.sshEnabled = false;
+            if (cfg.sshEnabled) return true;
         }
-        ProcessManager.LOGGER.error("Multiple instances have SSH enabled. SSH has been disabled for all instances; enable exactly one instance.");
+        return false;
+    }
+
+    /** 按 SSH 用户名解析实例：支持实例编号或实例名称（不区分大小写）。 */
+    public static InstanceConfig findSshInstance(String username) {
+        if (username == null) return null;
+        String value = username.trim();
+        if (value.isEmpty()) return null;
+        if (value.matches("\\d+")) return instances.get(value);
+        for (InstanceConfig cfg : instances.values()) {
+            if (cfg.name != null && cfg.name.equalsIgnoreCase(value)) return cfg;
+        }
+        return null;
+    }
+
+    /** 某实例是否可作为默认实例：已启用 SSH、使用密码认证且已设置密码。 */
+    private static boolean isSshDefaultEligible(InstanceConfig cfg) {
+        return cfg != null
+                && cfg.sshEnabled
+                && SSH_AUTH_PASSWORD.equals(normalizeSshAuthMode(cfg.sshAuthMode))
+                && cfg.sshPasswordHash != null
+                && !cfg.sshPasswordHash.isEmpty();
+    }
+
+    /** 未匹配用户名时使用的默认实例；未配置或当前不合格时返回 null。 */
+    public static String getSshDefaultInstance() {
+        InstanceConfig cfg = sshDefaultInstance == null ? null : instances.get(sshDefaultInstance);
+        return isSshDefaultEligible(cfg) ? cfg.id : null;
+    }
+
+    /** 配置中指定的默认实例编号，可能当前不合格或已停用。 */
+    public static String getSshDefaultInstanceConfigured() {
+        return sshDefaultInstance == null || sshDefaultInstance.isEmpty() ? null : sshDefaultInstance;
+    }
+
+    /** 该实例是否为配置指定的默认实例（即使当前停用或暂不合格）。 */
+    public static boolean isSshDefaultInstance(String id) {
+        return id != null && id.equals(sshDefaultInstance);
+    }
+
+    /** 清除默认实例：此后用户名无法匹配时直接拒绝，不再自动选择。 */
+    public static void clearSshDefaultInstance() {
+        sshDefaultInstance = "";
+        saveToml();
+        saveSshDefault();
+    }
+
+    public static boolean setSshDefaultInstance(String id) {
+        InstanceConfig cfg = id == null ? null : instances.get(id);
+        if (!isSshDefaultEligible(cfg)) return false;
+        sshDefaultInstance = id;
+        saveToml();
+        saveSshDefault();
+        return true;
+    }
+
+    /** 用户名匹配失败时回退到默认实例；公钥认证不使用此回退。 */
+    public static InstanceConfig findSshInstanceWithFallback(String username) {
+        InstanceConfig cfg = findSshInstance(username);
+        if (cfg != null) return cfg;
+        String defaultId = getSshDefaultInstance();
+        return defaultId == null ? null : instances.get(defaultId);
+    }
+
+    private static void loadSshDefault() {
+        Path path = SSH_DEFAULT_FILE;
+        if (!Files.isRegularFile(path)) return;
+        try {
+            sshDefaultInstance = new String(Files.readAllBytes(path), StandardCharsets.UTF_8).trim();
+        } catch (IOException e) {
+            ProcessManager.LOGGER.warn("Failed to read SSH default instance setting", e);
+        }
+    }
+
+    private static void saveSshDefault() {
+        try {
+            if (SSH_DEFAULT_FILE.getParent() != null) {
+                Files.createDirectories(SSH_DEFAULT_FILE.getParent());
+            }
+            String id = sshDefaultInstance;
+            if (id == null) {
+                return;
+            }
+            if (!id.isEmpty() && !instances.containsKey(id)) {
+                sshDefaultInstance = null;
+                return;
+            }
+            Files.write(SSH_DEFAULT_FILE, id.getBytes(StandardCharsets.UTF_8));
+            setFilePermissions600(SSH_DEFAULT_FILE);
+        } catch (IOException e) {
+            ProcessManager.LOGGER.error("Failed to save SSH default instance setting", e);
+        }
+    }
+
+    public static Path getSshKeysDirectory() {
+        return SSH_KEYS_DIR;
+    }
+
+    public static Path getSshAuthorizedKeysPath(String id) {
+        return SSH_KEYS_DIR.resolve(id + ".pub");
+    }
+
+    /** 读取某实例 authorized_keys 中的有效行（忽略空行与注释）。 */
+    public static List<String> readSshAuthorizedKeys(String id) {
+        Path path = getSshAuthorizedKeysPath(id);
+        if (!Files.isRegularFile(path)) return new ArrayList<>();
+        try {
+            List<String> keys = new ArrayList<>();
+            for (String line : Files.readAllLines(path, StandardCharsets.UTF_8)) {
+                String trimmed = line == null ? "" : line.trim();
+                if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
+                keys.add(trimmed);
+            }
+            return keys;
+        } catch (IOException e) {
+            ProcessManager.LOGGER.error("Failed to read SSH authorized keys for instance {}", id, e);
+            return new ArrayList<>();
+        }
+    }
+
+    public static int countSshAuthorizedKeys(String id) {
+        return readSshAuthorizedKeys(id).size();
+    }
+
+    /** 追加一条已规范化的公钥；重复公钥返回 false。 */
+    public static boolean addSshAuthorizedKey(String id, String keyLine) {
+        if (id == null || instances.get(id) == null || keyLine == null || keyLine.isBlank()) return false;
+        String normalized = keyLine.trim();
+        List<String> keys = readSshAuthorizedKeys(id);
+        if (keys.contains(normalized)) return false;
+        keys.add(normalized);
+        return writeSshAuthorizedKeys(id, keys);
+    }
+
+    /** 按 1 起始的序号删除公钥。 */
+    public static boolean removeSshAuthorizedKey(String id, int index) {
+        if (id == null || instances.get(id) == null) return false;
+        List<String> keys = readSshAuthorizedKeys(id);
+        if (index < 1 || index > keys.size()) return false;
+        keys.remove(index - 1);
+        return writeSshAuthorizedKeys(id, keys);
+    }
+
+    private static boolean writeSshAuthorizedKeys(String id, List<String> keys) {
+        try {
+            Files.createDirectories(SSH_KEYS_DIR);
+            setDirectoryPermissions700(SSH_KEYS_DIR);
+            Path file = getSshAuthorizedKeysPath(id);
+            StringBuilder content = new StringBuilder();
+            for (String key : keys) {
+                content.append(key).append('\n');
+            }
+            Files.write(file, content.toString().getBytes(StandardCharsets.UTF_8));
+            setFilePermissions600(file);
+            return true;
+        } catch (IOException e) {
+            ProcessManager.LOGGER.error("Failed to write SSH authorized keys for instance {}", id, e);
+            return false;
+        }
+    }
+
+    private static void setDirectoryPermissions700(Path path) {
+        try {
+            Files.setPosixFilePermissions(path, EnumSet.of(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.OWNER_EXECUTE));
+        } catch (UnsupportedOperationException | IOException e) {
+            // 文件系统不支持 POSIX 权限时忽略
+        }
+    }
+
+    /** 加载配置时规范化认证方式，并停用缺少凭据的实例。 */
+    private static void normalizeSshInstances() {
+        for (InstanceConfig cfg : instances.values()) {
+            cfg.sshAuthMode = normalizeSshAuthMode(cfg.sshAuthMode);
+            if (cfg.sshEnabled && !isSshAuthReady(cfg)) {
+                cfg.sshEnabled = false;
+                ProcessManager.LOGGER.warn("Instance {} has SSH enabled without valid {} credentials; SSH disabled.",
+                        cfg.id, cfg.sshAuthMode);
+            }
+        }
     }
 
     // ==================== 配置数据类 ====================
@@ -325,14 +524,17 @@ public class Config {
         public String outputTimeFormat = "HH:mm:ss";
         public int chartMaxPoints = 60;
 
-        /** 是否允许该实例通过 SSH 接入其控制台（与 Minecraft 共用端口）。全局仅允许一个实例启用。 */
+        /** 是否允许该实例通过 SSH 接入其控制台（与 Minecraft 共用端口）。支持多实例同时启用。 */
         public boolean sshEnabled = false;
-        /** SSH 密码的 bcrypt ($2b$) 哈希，加密保存，不存明文。用户名由客户端任意填写并被忽略。 */
+        /** SSH 认证方式："password" 或 "publickey"。 */
+        public String sshAuthMode = SSH_AUTH_PASSWORD;
+        /** SSH 密码的 bcrypt ($2b$) 哈希，加密保存，不存明文。 */
         public String sshPasswordHash = "";
     }
 
     // ==================== 加载 ====================
     public static void load() {
+        loadSshDefault();
         if (!Files.exists(CONFIG_PATH)) {
             defaultConfig = new InstanceConfig();
             instances.clear();
@@ -411,8 +613,9 @@ public class Config {
                 }
             }
 
-            enforceSingleSshInstance();
+            normalizeSshInstances();
             saveToml();
+            saveSshDefault();
             loadPasswordHash();
         } catch (Exception e) {
             ProcessManager.LOGGER.error("Failed to load pm_config.toml, using defaults", e);
@@ -455,6 +658,15 @@ public class Config {
         cfg.chartMaxPoints = table.getLong("chartMaxPoints", 60L).intValue();
         if (cfg.chartMaxPoints < 10) cfg.chartMaxPoints = 60;
         cfg.sshEnabled = table.getBoolean("sshEnabled", false);
+        String authMode = table.getString("sshAuthMode", SSH_AUTH_PASSWORD);
+        if (authMode == null || authMode.isBlank()) {
+            cfg.sshAuthMode = SSH_AUTH_PASSWORD;
+        } else if (!isValidSshAuthMode(authMode.trim().toLowerCase(Locale.ROOT))) {
+            ProcessManager.LOGGER.warn("Instance '{}' has invalid sshAuthMode '{}'; using password.", fallbackId, authMode);
+            cfg.sshAuthMode = SSH_AUTH_PASSWORD;
+        } else {
+            cfg.sshAuthMode = authMode.trim().toLowerCase(Locale.ROOT);
+        }
         String sshHashValue = table.getString("sshPasswordHash", "");
         cfg.sshPasswordHash = sshHashValue == null ? "" : sshHashValue;
         if (table.getString("sshUser") != null) {
@@ -506,11 +718,13 @@ public class Config {
         if (cfg.exitCode < 0) cfg.exitCode = defaults.exitCode;
         if (cfg.maxArchives <= 0) cfg.maxArchives = defaults.maxArchives;
         if (cfg.sshPasswordHash == null) cfg.sshPasswordHash = "";
+        cfg.sshAuthMode = normalizeSshAuthMode(cfg.sshAuthMode);
     }
 
     // ==================== 保存（全部交给 TomlWriter） ====================
     public static void save() {
         saveToml();
+        saveSshDefault();
     }
 
     private static void saveToml() {
@@ -572,6 +786,7 @@ public class Config {
         m.put("outputTimeFormat", cfg.outputTimeFormat);
         m.put("chartMaxPoints", (long) cfg.chartMaxPoints);
         m.put("sshEnabled", cfg.sshEnabled);
+        m.put("sshAuthMode", normalizeSshAuthMode(cfg.sshAuthMode));
         m.put("sshPasswordHash", cfg.sshPasswordHash == null ? "" : cfg.sshPasswordHash);
         return m;
     }

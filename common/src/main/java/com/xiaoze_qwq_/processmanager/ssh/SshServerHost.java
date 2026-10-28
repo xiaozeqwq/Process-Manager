@@ -8,14 +8,16 @@ import dev.architectury.platform.Platform;
 import org.apache.sshd.core.CoreModuleProperties;
 import org.apache.sshd.server.SshServer;
 import org.apache.sshd.server.auth.password.UserAuthPasswordFactory;
-import org.apache.sshd.server.auth.pubkey.RejectAllPublickeyAuthenticator;
+import org.apache.sshd.server.auth.pubkey.UserAuthPublicKeyFactory;
 import org.apache.sshd.server.channel.ChannelSession;
 import org.apache.sshd.server.command.Command;
 import org.apache.sshd.server.command.CommandFactory;
+import org.apache.sshd.server.config.keys.AuthorizedKeysAuthenticator;
 import org.apache.sshd.server.forward.RejectAllForwardingFilter;
 import org.apache.sshd.server.keyprovider.SimpleGeneratorHostKeyProvider;
 import org.apache.sshd.server.session.ServerSession;
 import org.apache.sshd.server.shell.ShellFactory;
+import org.apache.sshd.common.AttributeRepository;
 import org.apache.sshd.common.session.Session;
 import org.apache.sshd.common.session.SessionListener;
 
@@ -25,10 +27,12 @@ import java.net.SocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.security.PublicKey;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -36,14 +40,17 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 内嵌 SSH 服务端。仅监听回环地址，外网流量由 {@link ProtocolSniffHandler}
- * 从 Minecraft 端口嗅探后桥接进来。用户名不参与认证，密码只对应唯一启用 SSH 的实例；
- * 登录后直接接入该实例的控制台，不提供 shell、命令执行或端口转发。
+ * 从 Minecraft 端口嗅探后桥接进来。客户端以实例编号或实例名称作为用户名，
+ * 认证方式由目标实例配置决定（密码或公钥）；登录后直接接入该实例的控制台，
+ * 不提供 shell、命令执行或端口转发。
  */
 public final class SshServerHost {
-    private static final int MAX_AUTH_REQUESTS = 3;
+    private static final int MAX_AUTH_REQUESTS = 10;
     private static final Duration AUTH_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration IDLE_TIMEOUT = Duration.ofMinutes(10);
     private static final Object DUMMY_LOCK = new Object();
+    private static final AttributeRepository.AttributeKey<String> SESSION_INSTANCE_ID =
+            new AttributeRepository.AttributeKey<>();
     private static volatile String dummyHash;
 
     private static SshServerHost instance;
@@ -52,6 +59,7 @@ public final class SshServerHost {
     private final Map<Session, Long> sessionStarts = new ConcurrentHashMap<>();
     private final Map<Session, String> sessionIps = new ConcurrentHashMap<>();
     private final Map<Session, String> sessionInstances = new ConcurrentHashMap<>();
+    private final Map<String, AuthorizedKeysAuthenticator> keyAuthenticators = new ConcurrentHashMap<>();
 
     private SshServer sshd;
     private int localPort = -1;
@@ -61,7 +69,7 @@ public final class SshServerHost {
 
     public static synchronized void start() throws IOException {
         if (instance != null) return;
-        if (!Config.hasConfiguredSshInstance()) return;
+        if (!Config.hasEnabledSshInstance()) return;
         SshServerHost host = new SshServerHost();
         try {
             host.doStart();
@@ -83,15 +91,33 @@ public final class SshServerHost {
     }
 
     public static void disconnectAllSessions() {
-        SshServerHost host;
-        synchronized (SshServerHost.class) {
-            host = instance;
-        }
+        SshServerHost host = current();
         if (host != null) host.doDisconnectAll();
     }
 
-    public static synchronized int getActiveSessionCount() {
-        return instance != null ? instance.sessions.size() : 0;
+    public static void disconnectInstance(String instanceId) {
+        SshServerHost host = current();
+        if (host != null) host.doDisconnectInstance(instanceId);
+    }
+
+    public static void disconnectDisabledInstances() {
+        SshServerHost host = current();
+        if (host != null) host.doDisconnectDisabledInstances();
+    }
+
+    public static synchronized int getActiveSessionCount(String instanceId) {
+        if (instance == null) return 0;
+        int count = 0;
+        for (String id : instance.sessionInstances.values()) {
+            if (id.equals(instanceId)) count++;
+        }
+        return count;
+    }
+
+    private static SshServerHost current() {
+        synchronized (SshServerHost.class) {
+            return instance;
+        }
     }
 
     private void doStart() throws IOException {
@@ -101,9 +127,9 @@ public final class SshServerHost {
         sshd.setHost("127.0.0.1");
         sshd.setPort(0);
         sshd.setKeyPairProvider(createHostKeyProvider(hostKey));
-        sshd.setUserAuthFactories(Collections.singletonList(UserAuthPasswordFactory.INSTANCE));
-        sshd.setPasswordAuthenticator(this::authenticate);
-        sshd.setPublickeyAuthenticator(RejectAllPublickeyAuthenticator.INSTANCE);
+        sshd.setUserAuthFactories(List.of(UserAuthPasswordFactory.INSTANCE, UserAuthPublicKeyFactory.INSTANCE));
+        sshd.setPasswordAuthenticator(this::authenticatePassword);
+        sshd.setPublickeyAuthenticator(this::authenticatePublicKey);
         sshd.setForwardingFilter(RejectAllForwardingFilter.INSTANCE);
         sshd.setSubsystemFactories(Collections.emptyList());
 
@@ -138,22 +164,23 @@ public final class SshServerHost {
         return provider;
     }
 
-    private boolean authenticate(String username, String password, ServerSession session) {
+    private boolean authenticatePassword(String username, String password, ServerSession session) {
         String ip = peerIp(session);
-        if (!SshGuard.allowNewConnection(ip)) {
-            SshAudit.authFail(ip, null, "rate_limited");
-            return false;
-        }
         if (SshGuard.isLocked(ip)) {
             SshAudit.authFail(ip, null, "locked");
             return false;
         }
 
-        Config.InstanceConfig cfg = Config.getSshEnabledInstance();
+        Config.InstanceConfig cfg = Config.findSshInstanceWithFallback(username);
         String candidate = password == null ? "" : password;
-        if (cfg == null || cfg.sshPasswordHash == null || cfg.sshPasswordHash.isEmpty()) {
+        boolean passwordMode = cfg != null
+                && cfg.sshEnabled
+                && Config.SSH_AUTH_PASSWORD.equals(Config.normalizeSshAuthMode(cfg.sshAuthMode));
+        if (!passwordMode || cfg.sshPasswordHash == null || cfg.sshPasswordHash.isEmpty()) {
             Config.bcryptVerify(candidate, dummyHash());
-            SshAudit.authFail(ip, null, "no_instance");
+            if (cfg == null) SshGuard.recordFailure(ip);
+            SshAudit.authFail(ip, cfg == null ? null : cfg.id,
+                    cfg == null ? "unknown_instance" : "auth_mode_mismatch");
             return false;
         }
 
@@ -163,7 +190,7 @@ public final class SshServerHost {
         }
         boolean ok;
         try {
-            ok = Config.bcryptVerify(candidate, cfg.sshPasswordHash);
+            ok = Config.verifyInstanceSshPassword(cfg.id, candidate);
         } finally {
             SshGuard.releaseBcrypt();
         }
@@ -172,17 +199,77 @@ public final class SshServerHost {
             SshAudit.authFail(ip, cfg.id, "bad_password");
             return false;
         }
-        if (!SshGuard.tryAcquireSession(ip)) {
+        if (!registerSession(session, cfg.id, ip)) {
             SshAudit.authFail(ip, cfg.id, "session_limit");
             return false;
         }
-
-        sessions.add(session);
-        sessionStarts.put(session, System.currentTimeMillis());
-        sessionIps.put(session, ip);
-        sessionInstances.put(session, cfg.id);
+        session.setAttribute(SESSION_INSTANCE_ID, cfg.id);
         SshGuard.recordSuccess(ip);
         SshAudit.authOk(ip, cfg.id);
+        return true;
+    }
+
+    private boolean authenticatePublicKey(String username, PublicKey key, ServerSession session) {
+        String ip = peerIp(session);
+        if (SshGuard.isLocked(ip)) {
+            SshAudit.authFail(ip, null, "locked");
+            return false;
+        }
+
+        Config.InstanceConfig cfg = Config.findSshInstance(username);
+        boolean publicKeyMode = cfg != null
+                && cfg.sshEnabled
+                && Config.SSH_AUTH_PUBLICKEY.equals(Config.normalizeSshAuthMode(cfg.sshAuthMode));
+        if (!publicKeyMode) {
+            if (cfg == null) SshGuard.recordFailure(ip);
+            SshAudit.authFail(ip, cfg == null ? null : cfg.id,
+                    cfg == null ? "unknown_instance" : "auth_mode_mismatch");
+            return false;
+        }
+
+        Path keysPath = Config.getSshAuthorizedKeysPath(cfg.id);
+        if (!Files.isRegularFile(keysPath)) {
+            SshAudit.authFail(ip, cfg.id, "no_public_keys");
+            return false;
+        }
+        AuthorizedKeysAuthenticator authenticator = keyAuthenticators.computeIfAbsent(
+                cfg.id, id -> new AuthorizedKeysAuthenticator(Config.getSshAuthorizedKeysPath(id)));
+        if (!authenticator.authenticate(username, key, session)) {
+            SshAudit.authFail(ip, cfg.id, "bad_public_key");
+            return false;
+        }
+        session.setAttribute(SESSION_INSTANCE_ID, cfg.id);
+        return true;
+    }
+
+    /** 认证成功事件：公钥认证在签名验证完成后才登记会话，避免探测请求提前占位。 */
+    private void onAuthenticated(Session session) {
+        String instanceId = session.getAttribute(SESSION_INSTANCE_ID);
+        if (instanceId == null) return;
+        if (sessions.contains(session)) return;
+        String ip = peerIp(session);
+        if (!(session instanceof ServerSession serverSession)) return;
+        if (!registerSession(serverSession, instanceId, ip)) {
+            SshAudit.authFail(ip, instanceId, "session_limit");
+            try {
+                session.close(true);
+            } catch (Throwable ignored) {
+            }
+            return;
+        }
+        SshGuard.recordSuccess(ip);
+        SshAudit.authOk(ip, instanceId);
+    }
+
+    private boolean registerSession(ServerSession session, String instanceId, String ip) {
+        if (!sessions.add(session)) return true;
+        if (!SshGuard.tryAcquireSession(ip)) {
+            sessions.remove(session);
+            return false;
+        }
+        sessionStarts.put(session, System.currentTimeMillis());
+        sessionIps.put(session, ip);
+        sessionInstances.put(session, instanceId);
         return true;
     }
 
@@ -198,6 +285,34 @@ public final class SshServerHost {
 
     private void doDisconnectAll() {
         for (Session session : new ArrayList<>(sessions)) {
+            releaseTracking(session);
+            try {
+                session.close(true);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void doDisconnectInstance(String instanceId) {
+        if (instanceId == null) return;
+        for (Session session : new ArrayList<>(sessions)) {
+            String currentId = sessionInstances.get(session);
+            if (!instanceId.equals(currentId) && !instanceId.equals(session.getAttribute(SESSION_INSTANCE_ID))) {
+                continue;
+            }
+            releaseTracking(session);
+            try {
+                session.close(true);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void doDisconnectDisabledInstances() {
+        for (Session session : new ArrayList<>(sessions)) {
+            String instanceId = sessionInstances.get(session);
+            Config.InstanceConfig cfg = instanceId == null ? null : Config.getInstanceConfig(instanceId);
+            if (cfg != null && cfg.sshEnabled) continue;
             releaseTracking(session);
             try {
                 session.close(true);
@@ -258,12 +373,42 @@ public final class SshServerHost {
 
     private final class AuditSessionListener implements SessionListener {
         @Override
+        public void sessionEvent(Session session, Event event) {
+            if (event == Event.KexCompleted) {
+                enforceConnectionLimits(session);
+            } else if (event == Event.Authenticated) {
+                onAuthenticated(session);
+            }
+        }
+
+        @Override
         public void sessionClosed(Session session) {
             releaseTracking(session);
         }
     }
 
-    /** 仅允许交互式 shell 请求接入唯一启用实例的控制台；exec 命令一律拒绝。 */
+    /** 在 KEX 完成时限流：此时桥接已注册来源 IP，避免把回环地址当成所有客户端。 */
+    private static void enforceConnectionLimits(Session session) {
+        String ip = peerIp(session);
+        if (SshGuard.isLocked(ip)) {
+            SshAudit.authFail(ip, null, "locked");
+            closeQuietly(session);
+            return;
+        }
+        if (!SshGuard.allowNewConnection(ip)) {
+            SshAudit.authFail(ip, null, "rate_limited");
+            closeQuietly(session);
+        }
+    }
+
+    private static void closeQuietly(Session session) {
+        try {
+            session.close(true);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 仅允许交互式 shell 请求接入用户名指定实例的控制台；exec 命令一律拒绝。 */
     private static final class ConsoleCommandFactory implements ShellFactory, CommandFactory {
         @Override
         public Command createShell(ChannelSession channel) {
@@ -276,14 +421,20 @@ public final class SshServerHost {
                 SshAudit.bridgeRejected(peerIp(channel.getSession()), "exec_denied");
                 throw new IllegalStateException("Only the interactive console is supported");
             }
-            Config.InstanceConfig cfg = Config.getSshEnabledInstance();
-            if (cfg == null) {
-                SshAudit.bridgeRejected(peerIp(channel.getSession()), "no_enabled_instance");
+            ServerSession session = channel.getSession();
+            String instanceId = session.getAttribute(SESSION_INSTANCE_ID);
+            if (instanceId == null) {
+                SshAudit.bridgeRejected(peerIp(session), "no_authenticated_instance");
                 throw new IllegalStateException("SSH console is not available");
             }
-            ProcessInstance target = InstanceManager.getInstance().getInstance(cfg.id);
-            if (target == null) {
-                SshAudit.bridgeRejected(peerIp(channel.getSession()), "instance_not_loaded");
+            Config.InstanceConfig cfg = Config.getInstanceConfig(instanceId);
+            if (cfg == null || !cfg.sshEnabled) {
+                SshAudit.bridgeRejected(peerIp(session), "instance_disabled");
+                throw new IllegalStateException("SSH console is not available");
+            }
+            ProcessInstance target = InstanceManager.getInstance().getInstance(instanceId);
+            if (target == null || !target.isRunning()) {
+                SshAudit.bridgeRejected(peerIp(session), "instance_not_running");
                 throw new IllegalStateException("SSH console is not available");
             }
             return new InstanceConsoleCommand(target);

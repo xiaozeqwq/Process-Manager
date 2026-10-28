@@ -14,7 +14,11 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
+import org.apache.sshd.common.config.keys.AuthorizedKeyEntry;
+import org.apache.sshd.common.config.keys.KeyUtils;
 
+import java.security.PublicKey;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -126,7 +130,25 @@ public class CommandRegistry {
                         .then(Commands.literal("disable").executes(ctx -> executeSshDisable(ctx, getInstanceId(ctx))))
                         .then(Commands.literal("setpassword")
                                 .then(Commands.argument("password", StringArgumentType.greedyString())
-                                        .executes(ctx -> executeSshSetPassword(ctx, getInstanceId(ctx))))));
+                                        .executes(ctx -> executeSshSetPassword(ctx, getInstanceId(ctx)))))
+                        .then(Commands.literal("auth")
+                                .then(Commands.literal("password").executes(ctx -> executeSshSetAuthMode(
+                                        ctx, getInstanceId(ctx), Config.SSH_AUTH_PASSWORD)))
+                                .then(Commands.literal("publickey").executes(ctx -> executeSshSetAuthMode(
+                                        ctx, getInstanceId(ctx), Config.SSH_AUTH_PUBLICKEY))))
+                        .then(Commands.literal("keys").executes(ctx -> executeSshListKeys(ctx, getInstanceId(ctx))))
+                        .then(Commands.literal("addkey")
+                                .then(Commands.argument("key", StringArgumentType.greedyString())
+                                        .executes(ctx -> executeSshAddKey(ctx, getInstanceId(ctx)))))
+                        .then(Commands.literal("delkey")
+                                .then(Commands.argument("index", IntegerArgumentType.integer(1))
+                                        .executes(ctx -> executeSshDeleteKey(ctx, getInstanceId(ctx)))))
+                        .then(Commands.literal("default")
+                                .executes(ctx -> executeSshShowDefault(ctx, getInstanceId(ctx)))
+                                .then(Commands.literal("set")
+                                        .executes(ctx -> executeSshSetDefault(ctx, getInstanceId(ctx))))
+                                .then(Commands.literal("clear")
+                                        .executes(ctx -> executeSshClearDefault(ctx)))));
 
         base.then(instanceNode);
         base.executes(CommandRegistry::executeHelp);
@@ -553,13 +575,102 @@ public class CommandRegistry {
         ProcessInstance inst = resolveInstance(ctx, id);
         if (inst == null) return 0;
         Config.InstanceConfig cfg = inst.getConfig();
+        String mode = Config.normalizeSshAuthMode(cfg.sshAuthMode);
         boolean hasPassword = cfg.sshPasswordHash != null && !cfg.sshPasswordHash.isEmpty();
+        int keyCount = Config.countSshAuthorizedKeys(id);
+        boolean ready = Config.isSshAuthReady(cfg);
         boolean sshdRunning = SshServerHost.getPort() > 0;
         src.sendSuccess(() -> Component.literal(
                 "SSH for instance " + id + ": enabled=" + cfg.sshEnabled
+                        + ", auth=" + mode
+                        + ", credentials=" + (ready ? "ready" : "missing")
                         + ", password=" + (hasPassword ? "set" : "unset")
+                        + ", keys=" + keyCount
                         + ", server=" + (sshdRunning ? "running" : "stopped")
-                        + ", sessions=" + SshServerHost.getActiveSessionCount()), false);
+                        + ", sessions=" + SshServerHost.getActiveSessionCount(id)), false);
+        String name = cfg.name == null || cfg.name.isBlank() ? id : cfg.name;
+        src.sendSuccess(() -> Component.literal(
+                "Connect with: ssh -p <mc-port> " + id + "@<host>  (instance name: " + name + ")"), false);
+        if (Config.SSH_AUTH_PUBLICKEY.equals(mode)) {
+            src.sendSuccess(() -> Component.literal(
+                    "Public keys file: " + Config.getSshAuthorizedKeysPath(id)), false);
+        }
+        String defaultId = Config.getSshDefaultInstance();
+        if (id.equals(defaultId)) {
+            src.sendSuccess(() -> Component.literal(
+                    "This is the SSH default instance: unmatched usernames will require its password."), false);
+        } else if (defaultId != null) {
+            src.sendSuccess(() -> Component.literal(
+                    "Unmatched SSH usernames fall back to instance " + defaultId
+                            + " and require that instance's password."), false);
+        } else {
+            src.sendSuccess(() -> Component.literal(
+                    "No SSH default instance is set: unmatched usernames are rejected."), false);
+        }
+        return 1;
+    }
+
+    private static int executeSshShowDefault(CommandContext<CommandSourceStack> ctx, String id)
+            throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        String activeId = Config.getSshDefaultInstance();
+        String configuredId = Config.getSshDefaultInstanceConfigured();
+        String shown = activeId != null ? activeId : configuredId;
+        Config.InstanceConfig cfg = shown == null ? null : Config.getInstanceConfig(shown);
+        String name = cfg == null || cfg.name == null || cfg.name.isBlank() ? "" : " (" + cfg.name + ")";
+        String suffix = activeId != null || shown == null ? ""
+                : " [inactive: enable it with password auth to use the fallback]";
+        src.sendSuccess(() -> Component.literal(
+                "SSH default instance: " + (shown == null ? "(none)" : shown + name + suffix)), false);
+        return 1;
+    }
+
+    private static int executeSshSetDefault(CommandContext<CommandSourceStack> ctx, String id)
+            throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        if (!isConsole(src)) {
+            src.sendFailure(Component.literal("For security, change the SSH default instance from the server console only."));
+            return 0;
+        }
+        ProcessInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        Config.InstanceConfig cfg = inst.getConfig();
+        if (!cfg.sshEnabled) {
+            src.sendFailure(Component.literal("Enable SSH for instance " + id + " before making it the default."));
+            return 0;
+        }
+        if (!Config.SSH_AUTH_PASSWORD.equals(Config.normalizeSshAuthMode(cfg.sshAuthMode))) {
+            src.sendFailure(Component.literal(
+                    "The default instance must use password authentication so unmatched usernames can be rejected or accepted safely."));
+            return 0;
+        }
+        if (cfg.sshPasswordHash == null || cfg.sshPasswordHash.isEmpty()) {
+            src.sendFailure(Component.literal("Set an SSH password for instance " + id + " first."));
+            return 0;
+        }
+        if (!Config.setSshDefaultInstance(id)) {
+            src.sendFailure(Component.literal("Failed to set SSH default instance."));
+            return 0;
+        }
+        ProcessManager.applySshConfigurationChange();
+        src.sendSuccess(() -> Component.literal(
+                "SSH default instance set to " + id + ". Unmatched usernames will require this instance's password."), false);
+        return 1;
+    }
+
+    private static int executeSshClearDefault(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        if (!isConsole(src)) {
+            src.sendFailure(Component.literal("For security, change the SSH default instance from the server console only."));
+            return 0;
+        }
+        Config.clearSshDefaultInstance();
+        ProcessManager.applySshConfigurationChange();
+        src.sendSuccess(() -> Component.literal(
+                "SSH default instance cleared. Unmatched usernames are now rejected."), false);
         return 1;
     }
 
@@ -569,17 +680,16 @@ public class CommandRegistry {
         ProcessInstance inst = resolveInstance(ctx, id);
         if (inst == null) return 0;
         Config.InstanceConfig cfg = inst.getConfig();
-        if (cfg.sshPasswordHash == null || cfg.sshPasswordHash.isEmpty()) {
-            src.sendFailure(Component.literal("Set an SSH password first: /pm " + id + " ssh setpassword <password>"));
+        if (!Config.isSshAuthReady(cfg)) {
+            if (Config.SSH_AUTH_PUBLICKEY.equals(Config.normalizeSshAuthMode(cfg.sshAuthMode))) {
+                src.sendFailure(Component.literal("Add a public key first: /pm " + id + " ssh addkey <public-key>"));
+            } else {
+                src.sendFailure(Component.literal("Set an SSH password first: /pm " + id + " ssh setpassword <password>"));
+            }
             return 0;
         }
         if (inst.isRunning() || !inst.canStartNewOperation()) {
             src.sendFailure(Component.literal("Stop the instance before enabling SSH."));
-            return 0;
-        }
-        Config.InstanceConfig enabled = Config.getSshEnabledInstance();
-        if (enabled != null && !enabled.id.equals(id)) {
-            src.sendFailure(Component.literal("SSH is already enabled for instance " + enabled.id + ". Disable it first."));
             return 0;
         }
         if (!Config.setInstanceSshEnabled(id, true)) {
@@ -589,11 +699,16 @@ public class CommandRegistry {
         ProcessManager.applySshConfigurationChange();
         if (SshServerHost.getPort() <= 0) {
             Config.setInstanceSshEnabled(id, false);
+            ProcessManager.applySshConfigurationChange();
             src.sendFailure(Component.literal("SSH server failed to start. Check the server log."));
             return 0;
         }
+        String name = cfg.name == null || cfg.name.isBlank() ? null : cfg.name;
+        String hint = name == null || name.equals(id)
+                ? id + "@<host>"
+                : id + "@<host> or " + name + "@<host>";
         src.sendSuccess(() -> Component.literal(
-                "SSH enabled for instance " + id + ". Connect with: ssh -p <mc-port> <any-username>@<host>"), false);
+                "SSH enabled for instance " + id + ". Connect with: ssh -p <mc-port> " + hint), false);
         return 1;
     }
 
@@ -611,7 +726,7 @@ public class CommandRegistry {
         if (wasEnabled) {
             ProcessManager.applySshConfigurationChange();
         }
-        src.sendSuccess(() -> Component.literal("SSH disabled for instance " + id + ". All SSH sessions closed."), false);
+        src.sendSuccess(() -> Component.literal("SSH disabled for instance " + id + ". Its SSH sessions have been closed."), false);
         return 1;
     }
 
@@ -637,10 +752,158 @@ public class CommandRegistry {
             src.sendFailure(Component.literal("Failed to set SSH password."));
             return 0;
         }
-        if (inst.getConfig().sshEnabled) {
-            ProcessManager.disconnectSshSessions();
+        Config.InstanceConfig cfg = Config.getInstanceConfig(id);
+        if (cfg != null && cfg.sshEnabled
+                && Config.SSH_AUTH_PASSWORD.equals(Config.normalizeSshAuthMode(cfg.sshAuthMode))) {
+            ProcessManager.disconnectSshSessions(id);
         }
         src.sendSuccess(() -> Component.literal("SSH password for instance " + id + " has been set (bcrypt)."), false);
+        return 1;
+    }
+
+    private static int executeSshSetAuthMode(CommandContext<CommandSourceStack> ctx, String id, String mode)
+            throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        if (!isConsole(src)) {
+            src.sendFailure(Component.literal("For security, change the SSH auth mode from the server console only."));
+            return 0;
+        }
+        ProcessInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        if (inst.isRunning() || !inst.canStartNewOperation()) {
+            src.sendFailure(Component.literal("Stop the instance before changing the SSH auth mode."));
+            return 0;
+        }
+        Config.InstanceConfig cfg = inst.getConfig();
+        if (Config.SSH_AUTH_PUBLICKEY.equals(mode) && Config.isSshDefaultInstance(id)) {
+            src.sendFailure(Component.literal(
+                    "This instance is the SSH default and must keep password authentication. Set another default first."));
+            return 0;
+        }
+        if (Config.SSH_AUTH_PUBLICKEY.equals(mode) && Config.countSshAuthorizedKeys(id) == 0) {
+            src.sendFailure(Component.literal("Add a public key first: /pm " + id + " ssh addkey <public-key>"));
+            return 0;
+        }
+        if (Config.SSH_AUTH_PASSWORD.equals(mode)
+                && (cfg.sshPasswordHash == null || cfg.sshPasswordHash.isEmpty())) {
+            src.sendFailure(Component.literal("Set an SSH password first: /pm " + id + " ssh setpassword <password>"));
+            return 0;
+        }
+        if (!Config.setInstanceSshAuthMode(id, mode)) {
+            src.sendFailure(Component.literal("Failed to change SSH auth mode for instance " + id + "."));
+            return 0;
+        }
+        Config.InstanceConfig updated = Config.getInstanceConfig(id);
+        if (updated != null && updated.sshEnabled) {
+            ProcessManager.applySshConfigurationChange();
+            ProcessManager.disconnectSshSessions(id);
+        }
+        src.sendSuccess(() -> Component.literal(
+                "SSH auth mode for instance " + id + " set to " + mode + ". Existing sessions were closed."), false);
+        return 1;
+    }
+
+    private static int executeSshListKeys(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        ProcessInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        List<String> keys = Config.readSshAuthorizedKeys(id);
+        if (keys.isEmpty()) {
+            src.sendSuccess(() -> Component.literal(
+                    "No SSH public keys configured for instance " + id + ". Add one with: /pm " + id + " ssh addkey <public-key>"), false);
+            return 1;
+        }
+        for (int i = 0; i < keys.size(); i++) {
+            int index = i + 1;
+            String line = keys.get(i);
+            String summary;
+            try {
+                AuthorizedKeyEntry entry = AuthorizedKeyEntry.parseAuthorizedKeyEntry(line);
+                PublicKey key = entry == null ? null : entry.resolvePublicKey(null, null, null);
+                String comment = entry == null || entry.getComment() == null || entry.getComment().isBlank()
+                        ? "" : " " + entry.getComment();
+                summary = entry == null || key == null
+                        ? "(unparsable key)"
+                        : entry.getKeyType() + " " + KeyUtils.getFingerPrint(key) + comment;
+            } catch (Exception e) {
+                summary = "(unparsable key)";
+            }
+            String rendered = summary;
+            src.sendSuccess(() -> Component.literal(index + ": " + rendered), false);
+        }
+        return 1;
+    }
+
+    private static int executeSshAddKey(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        if (!isConsole(src)) {
+            src.sendFailure(Component.literal("For security, add SSH public keys from the server console only."));
+            return 0;
+        }
+        ProcessInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        String raw = StringArgumentType.getString(ctx, "key");
+        AuthorizedKeyEntry entry;
+        PublicKey key;
+        try {
+            entry = AuthorizedKeyEntry.parseAuthorizedKeyEntry(raw);
+            if (entry == null) throw new IllegalArgumentException("empty key");
+            key = entry.resolvePublicKey(null, null, null);
+        } catch (Exception e) {
+            src.sendFailure(Component.literal("Invalid SSH public key. Expected format: ssh-ed25519 AAAA... comment"));
+            return 0;
+        }
+        if (key == null) {
+            src.sendFailure(Component.literal("Invalid SSH public key. Expected format: ssh-ed25519 AAAA... comment"));
+            return 0;
+        }
+        if (!Config.addSshAuthorizedKey(id, entry.toString())) {
+            src.sendFailure(Component.literal("This public key is already configured or could not be saved."));
+            return 0;
+        }
+        String fingerprint = KeyUtils.getFingerPrint(key);
+        String keyType = entry.getKeyType();
+        int total = Config.countSshAuthorizedKeys(id);
+        src.sendSuccess(() -> Component.literal(
+                "Added " + keyType + " key " + fingerprint + " to instance " + id + ". Total keys: " + total), false);
+        return 1;
+    }
+
+    private static int executeSshDeleteKey(CommandContext<CommandSourceStack> ctx, String id) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ssh")) return errorNoPermission(ctx);
+        if (!isConsole(src)) {
+            src.sendFailure(Component.literal("For security, remove SSH public keys from the server console only."));
+            return 0;
+        }
+        ProcessInstance inst = resolveInstance(ctx, id);
+        if (inst == null) return 0;
+        int index = IntegerArgumentType.getInteger(ctx, "index");
+        if (!Config.removeSshAuthorizedKey(id, index)) {
+            src.sendFailure(Component.literal("No SSH public key at index " + index + "."));
+            return 0;
+        }
+        Config.InstanceConfig cfg = Config.getInstanceConfig(id);
+        boolean noKeysLeft = Config.countSshAuthorizedKeys(id) == 0;
+        if (noKeysLeft && cfg != null && cfg.sshEnabled
+                && Config.SSH_AUTH_PUBLICKEY.equals(Config.normalizeSshAuthMode(cfg.sshAuthMode))) {
+            if (!inst.isRunning() && inst.canStartNewOperation()) {
+                Config.setInstanceSshEnabled(id, false);
+                ProcessManager.applySshConfigurationChange();
+                src.sendSuccess(() -> Component.literal(
+                        "Removed key " + index + " from instance " + id
+                                + ". No keys remain, so SSH has been disabled."), false);
+                return 1;
+            }
+            src.sendSuccess(() -> Component.literal(
+                    "Removed key " + index + " from instance " + id
+                            + ". No keys remain, so new logins are rejected until you add a key."), false);
+            return 1;
+        }
+        src.sendSuccess(() -> Component.literal("Removed SSH public key " + index + " from instance " + id + "."), false);
         return 1;
     }
 
