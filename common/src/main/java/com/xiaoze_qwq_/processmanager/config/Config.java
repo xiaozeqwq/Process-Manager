@@ -394,8 +394,9 @@ public class Config {
                 return;
             }
             if (!id.isEmpty() && !instances.containsKey(id)) {
-                sshDefaultInstance = null;
-                return;
+                ProcessManager.LOGGER.warn("SSH default instance {} no longer exists; clearing the setting.", id);
+                sshDefaultInstance = "";
+                id = "";
             }
             Files.write(SSH_DEFAULT_FILE, id.getBytes(StandardCharsets.UTF_8));
             setFilePermissions600(SSH_DEFAULT_FILE);
