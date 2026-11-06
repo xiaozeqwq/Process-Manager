@@ -11,9 +11,11 @@ import net.minecraft.network.chat.Component;
 public class ClientPacketHandlers {
 
     public static void handleOutput(OutputPacket msg, NetworkManager.PacketContext ctx) {
-        ctx.queue(() -> Minecraft.getInstance().execute(() ->
-                ImmersiveConsoleScreen.addLine(msg.instanceId(), ANSITextProcessorClient.toTextComponent(msg.rawANSI()))
-        ));
+        ctx.queue(() -> Minecraft.getInstance().execute(() -> {
+            for (String line : msg.rawANSI().split("\n", -1)) {
+                ImmersiveConsoleScreen.addLine(msg.instanceId(), ANSITextProcessorClient.toTextComponent(line));
+            }
+        }));
     }
 
     public static void handleImmersiveStatus(ImmersiveStatusPacket msg, NetworkManager.PacketContext ctx) {
@@ -60,17 +62,17 @@ public class ClientPacketHandlers {
 
     public static void handleCookieGrant(CookieGrantPacket msg, NetworkManager.PacketContext ctx) {
         ctx.queue(() -> Minecraft.getInstance().execute(() ->
-                ClientCookieStorage.saveCookie(ClientCookieStorage.currentServerAddress(), msg.token(), msg.expiresAt())
+                ClientCookieStorage.saveCookie(ClientCookieStorage.currentAccountKey(), msg.token(), msg.expiresAt())
         ));
     }
 
     public static void handleCookieAuthResult(CookieAuthResultPacket msg, NetworkManager.PacketContext ctx) {
         ctx.queue(() -> Minecraft.getInstance().execute(() -> {
-            String serverAddress = ClientCookieStorage.currentServerAddress();
+            String accountKey = ClientCookieStorage.currentAccountKey();
             if (msg.success()) {
-                msg.newCookie().ifPresent(nc -> ClientCookieStorage.saveCookie(serverAddress, nc.token(), nc.expiresAt()));
+                msg.newCookie().ifPresent(nc -> ClientCookieStorage.saveCookie(accountKey, nc.token(), nc.expiresAt()));
             } else {
-                ClientCookieStorage.deleteCookie(serverAddress);
+                ClientCookieStorage.deleteCookie(accountKey);
                 Minecraft mc = Minecraft.getInstance();
                 if (mc.player != null) {
                     mc.player.sendSystemMessage(Component.literal("[PM] Auto-login failed: " + msg.message()));

@@ -221,25 +221,51 @@ public final class SshServerHost {
                 && cfg.sshEnabled
                 && Config.SSH_AUTH_PUBLICKEY.equals(Config.normalizeSshAuthMode(cfg.sshAuthMode));
         if (!publicKeyMode) {
-            if (cfg == null) SshGuard.recordFailure(ip);
+            SshGuard.recordFailure(ip);
             SshAudit.authFail(ip, cfg == null ? null : cfg.id,
                     cfg == null ? "unknown_instance" : "auth_mode_mismatch");
+            closeIfLocked(ip, session);
             return false;
         }
 
         Path keysPath = Config.getSshAuthorizedKeysPath(cfg.id);
         if (!Files.isRegularFile(keysPath)) {
+            SshGuard.recordFailure(ip);
             SshAudit.authFail(ip, cfg.id, "no_public_keys");
+            closeIfLocked(ip, session);
             return false;
         }
         AuthorizedKeysAuthenticator authenticator = keyAuthenticators.computeIfAbsent(
                 cfg.id, id -> new AuthorizedKeysAuthenticator(Config.getSshAuthorizedKeysPath(id)));
         if (!authenticator.authenticate(username, key, session)) {
+            SshGuard.recordFailure(ip);
             SshAudit.authFail(ip, cfg.id, "bad_public_key");
+            closeIfLocked(ip, session);
             return false;
         }
         session.setAttribute(SESSION_INSTANCE_ID, cfg.id);
         return true;
+    }
+
+    /** 失败次数达到锁定阈值后立即断开连接，避免继续消耗认证尝试次数。 */
+    private static void closeIfLocked(String ip, ServerSession session) {
+        if (SshGuard.isLocked(ip)) {
+            try {
+                session.close(true);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** 授权公钥列表变更后失效缓存，使下一次认证重新读取文件。 */
+    public static void invalidateKeyCache(String instanceId) {
+        SshServerHost host = current();
+        if (host == null) return;
+        if (instanceId == null || instanceId.isEmpty()) {
+            host.keyAuthenticators.clear();
+        } else {
+            host.keyAuthenticators.remove(instanceId);
+        }
     }
 
     /** 认证成功事件：公钥认证在签名验证完成后才登记会话，避免探测请求提前占位。 */

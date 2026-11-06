@@ -34,13 +34,19 @@ public record CookieAuthPacket(String token, String deviceId) implements CustomP
                 SessionManager mgr = SessionManager.getInstance();
                 String serverAddress = SessionManager.serverAddressOf(player.getServer());
                 SessionManager.CookieValidation validation = mgr.validateCookie(msg.token(), msg.deviceId(), serverAddress);
-                if (validation.success()) {
+                boolean ownerMatches = validation.success()
+                        && validation.cookie().uuid().equals(player.getUUID());
+                if (ownerMatches) {
                     mgr.grant(player, SessionManager.defaultDurationMs());
                     CookieGrantPacket newCookie = validation.needsNewToken()
                             ? new CookieGrantPacket(validation.newToken(), validation.newExpiresAt())
                             : null;
                     ProcessManager.sendToPlayer(player, new CookieAuthResultPacket(true, "auto-login success", Optional.ofNullable(newCookie)));
                 } else {
+                    if (validation.success()) {
+                        ProcessManager.LOGGER.warn("Rejected PM cookie presented by {}: token belongs to another account.",
+                                player.getGameProfile().getName());
+                    }
                     ProcessManager.sendToPlayer(player, new CookieAuthResultPacket(false, "auto-login failed", Optional.empty()));
                 }
             }

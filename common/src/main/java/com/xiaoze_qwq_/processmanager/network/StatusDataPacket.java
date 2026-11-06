@@ -10,7 +10,7 @@ import net.minecraft.resources.ResourceLocation;
 public record StatusDataPacket(String instanceId, boolean mccRunning, String uptime,
                                double cpuUsage, long memoryMB,
                                double downloadSpeedKBps, double uploadSpeedKBps,
-                               long totalRxMB, long totalTxMB) implements CustomPacketPayload {
+                               long totalRxMB, long totalTxMB, int chartMaxPoints) implements CustomPacketPayload {
 
     public static final CustomPacketPayload.Type<StatusDataPacket> TYPE =
             new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath(ProcessManager.MOD_ID, "status_data"));
@@ -36,6 +36,7 @@ public record StatusDataPacket(String instanceId, boolean mccRunning, String upt
                     ByteBufCodecs.STRING_UTF8, StatusDataPacket::uptime,
                     ByteBufCodecs.DOUBLE, StatusDataPacket::cpuUsage,
                     SUB_STATS_CODEC, StatusDataPacket::toSubStats,
+                    ByteBufCodecs.VAR_INT, StatusDataPacket::chartMaxPoints,
                     StatusDataPacket::new
             );
 
@@ -43,9 +44,10 @@ public record StatusDataPacket(String instanceId, boolean mccRunning, String upt
         return new SubStats(memoryMB, downloadSpeedKBps, uploadSpeedKBps, totalRxMB, totalTxMB);
     }
 
-    public StatusDataPacket(String instanceId, boolean mccRunning, String uptime, double cpuUsage, SubStats sub) {
+    public StatusDataPacket(String instanceId, boolean mccRunning, String uptime, double cpuUsage, SubStats sub,
+                            int chartMaxPoints) {
         this(instanceId, mccRunning, uptime, cpuUsage, sub.memoryMB(),
-                sub.downloadSpeedKBps(), sub.uploadSpeedKBps(), sub.totalRxMB(), sub.totalTxMB());
+                sub.downloadSpeedKBps(), sub.uploadSpeedKBps(), sub.totalRxMB(), sub.totalTxMB(), chartMaxPoints);
     }
 
     @Override

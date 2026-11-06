@@ -15,6 +15,12 @@ public class NetworkRegistry {
         );
         NetworkManager.registerReceiver(
                 NetworkManager.c2s(),
+                StatusUnsubscribePacket.TYPE,
+                StatusUnsubscribePacket.STREAM_CODEC,
+                StatusUnsubscribePacket::handle
+        );
+        NetworkManager.registerReceiver(
+                NetworkManager.c2s(),
                 ImmersiveInputPacket.TYPE,
                 ImmersiveInputPacket.STREAM_CODEC,
                 ImmersiveInputPacket::handle

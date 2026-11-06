@@ -15,8 +15,8 @@ Architectury multi-loader mod for Minecraft 1.21.1. Same common sources produce 
 
 Artifacts:
 
-- `neoforge/build/libs/processmanager-1.0.0.jar`
-- `fabric/build/libs/processmanager-1.0.0.jar`
+- `neoforge/build/libs/processmanager-1.0.12.jar`
+- `fabric/build/libs/processmanager-1.0.12.jar`
 
 Both loaders require Architectury API 13.0.8+. Fabric does not declare Fabric API.
 

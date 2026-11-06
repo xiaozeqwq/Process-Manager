@@ -28,7 +28,6 @@ dependencies {
     shadowCommon(project(path: ':common', configuration: 'transformProductionFabric')) { transitive false }
 
     implementation 'com.moandjiezana.toml:toml4j:0.7.2'
-    implementation 'org.apache.commons:commons-compress:1.26.0'
     implementation 'commons-codec:commons-codec:1.16.0'
     implementation('org.apache.sshd:sshd-core:2.13.2') {
         exclude group: 'org.slf4j'
@@ -38,7 +37,6 @@ dependencies {
         exclude group: 'org.slf4j'
     }
     shadow 'com.moandjiezana.toml:toml4j:0.7.2'
-    shadow 'org.apache.commons:commons-compress:1.26.0'
     shadow 'commons-codec:commons-codec:1.16.0'
     shadow('org.apache.sshd:sshd-core:2.13.2') {
         exclude group: 'org.slf4j'
@@ -82,7 +80,6 @@ processResources {
 shadowJar {
     configurations = [project.configurations.shadowCommon, project.configurations.shadow]
     archiveClassifier = 'dev-shadow'
-    relocate 'org.apache.commons.compress', 'com.xiaoze_qwq_.processmanager.shadow.compress'
     relocate 'org.apache.commons.codec', 'com.xiaoze_qwq_.processmanager.shadow.codec'
     relocate 'org.apache.commons.lang3', 'com.xiaoze_qwq_.processmanager.shadow.lang3'
     relocate 'org.apache.commons.io', 'com.xiaoze_qwq_.processmanager.shadow.io'

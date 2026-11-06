@@ -30,6 +30,9 @@ public class Config {
     private static final int SALT_BYTES = 16;
     private static final SecureRandom RNG = new SecureRandom();
 
+    public static final int MIN_PASSWORD_LENGTH = 6;
+    public static final int MAX_PASSWORD_LENGTH = 128;
+
     private static final ExecutorService HASH_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "PM-Hash");
         t.setDaemon(true);
@@ -87,6 +90,22 @@ public class Config {
         } catch (Exception e) {
             ProcessManager.LOGGER.error("Failed to load or create PM secret key", e);
             secretKey = new byte[0];
+        }
+    }
+
+    /** 先写入同目录临时文件再原子替换，避免写入中断导致配置损坏。 */
+    private static void writeAtomically(Path target, byte[] content) throws IOException {
+        Path parent = target.getParent();
+        Path temp = Files.createTempFile(parent, target.getFileName().toString(), ".tmp");
+        try {
+            Files.write(temp, content);
+            try {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temp);
         }
     }
 
@@ -515,11 +534,6 @@ public class Config {
         public boolean enableProcessMonitor = true;
         public boolean enableNetworkMonitor = true;
         public int historyLimit = 2000;
-        public String logDirectory = "output";
-        public String compressionFormat = "tar.gz";
-        public int maxArchives = 10;
-        public boolean saveLogTime = true;
-        public String timeFormat = "HH:mm:ss";
         public boolean outputAlone = false;
         public boolean outputWithTime = true;
         public String outputTimeFormat = "HH:mm:ss";
@@ -648,11 +662,7 @@ public class Config {
         cfg.enableProcessMonitor = table.getBoolean("enableProcessMonitor", true);
         cfg.enableNetworkMonitor = table.getBoolean("enableNetworkMonitor", true);
         cfg.historyLimit = table.getLong("historyLimit", 2000L).intValue();
-        cfg.logDirectory = table.getString("logDirectory", "");
-        cfg.compressionFormat = table.getString("compressionFormat", "tar.gz");
-        cfg.maxArchives = table.getLong("maxArchives", 10L).intValue();
-        cfg.saveLogTime = table.getBoolean("saveLogTime", true);
-        cfg.timeFormat = table.getString("timeFormat", "HH:mm:ss");
+        warnDeprecatedLogFields(table, cfg.id);
         cfg.outputAlone = table.getBoolean("outputAlone", false);
         cfg.outputWithTime = table.getBoolean("outputWithTime", true);
         cfg.outputTimeFormat = table.getString("outputTimeFormat", "HH:mm:ss");
@@ -685,6 +695,15 @@ public class Config {
         return cfg;
     }
 
+    /** 文件日志功能已移除，旧配置中的相关字段统一告警忽略。 */
+    private static void warnDeprecatedLogFields(Toml table, String id) {
+        for (String field : List.of("logDirectory", "compressionFormat", "maxArchives", "saveLogTime", "timeFormat")) {
+            if (table.toMap().containsKey(field)) {
+                ProcessManager.LOGGER.warn("Instance '{}' contains deprecated field '{}' which is ignored; file logging has been removed.", id, field);
+            }
+        }
+    }
+
     /** environment 直接走 table.toMap()，由 Toml 库反转义 */
     private static Map<String, String> parseEnvironment(Toml table) {
         Object envObj = table.toMap().get("environment");
@@ -713,11 +732,9 @@ public class Config {
         if (cfg.gracefulStopTimeoutSeconds <= 0) cfg.gracefulStopTimeoutSeconds = defaults.gracefulStopTimeoutSeconds;
         if (cfg.environment.isEmpty() && !defaults.environment.isEmpty()) cfg.environment = defaults.environment;
         if (cfg.workingDirectory.isEmpty()) cfg.workingDirectory = defaults.workingDirectory;
-        if (cfg.logDirectory.isEmpty()) cfg.logDirectory = defaults.logDirectory.isEmpty() ? "output" : defaults.logDirectory;
         if (cfg.statusRefreshSeconds <= 0) cfg.statusRefreshSeconds = defaults.statusRefreshSeconds;
         if (cfg.historyLimit <= 0) cfg.historyLimit = defaults.historyLimit;
         if (cfg.exitCode < 0) cfg.exitCode = defaults.exitCode;
-        if (cfg.maxArchives <= 0) cfg.maxArchives = defaults.maxArchives;
         if (cfg.sshPasswordHash == null) cfg.sshPasswordHash = "";
         cfg.sshAuthMode = normalizeSshAuthMode(cfg.sshAuthMode);
     }
@@ -752,7 +769,7 @@ public class Config {
             if (CONFIG_PATH.getParent() != null) {
                 Files.createDirectories(CONFIG_PATH.getParent());
             }
-            Files.write(CONFIG_PATH, content.getBytes(StandardCharsets.UTF_8));
+            writeAtomically(CONFIG_PATH, content.getBytes(StandardCharsets.UTF_8));
             setFilePermissions600(CONFIG_PATH);
         } catch (IOException e) {
             ProcessManager.LOGGER.error("Failed to save pm_config.toml", e);
@@ -777,11 +794,6 @@ public class Config {
         m.put("enableProcessMonitor", cfg.enableProcessMonitor);
         m.put("enableNetworkMonitor", cfg.enableNetworkMonitor);
         m.put("historyLimit", (long) cfg.historyLimit);
-        m.put("logDirectory", cfg.logDirectory);
-        m.put("compressionFormat", cfg.compressionFormat);
-        m.put("maxArchives", (long) cfg.maxArchives);
-        m.put("saveLogTime", cfg.saveLogTime);
-        m.put("timeFormat", cfg.timeFormat);
         m.put("outputAlone", cfg.outputAlone);
         m.put("outputWithTime", cfg.outputWithTime);
         m.put("outputTimeFormat", cfg.outputTimeFormat);
@@ -808,9 +820,6 @@ public class Config {
             case "enableProcessMonitor": cfg.enableProcessMonitor = (boolean) value; break;
             case "enableNetworkMonitor": cfg.enableNetworkMonitor = (boolean) value; break;
             case "historyLimit": cfg.historyLimit = (int) value; break;
-            case "logDirectory": cfg.logDirectory = (String) value; break;
-            case "saveLogTime": cfg.saveLogTime = (boolean) value; break;
-            case "timeFormat": cfg.timeFormat = (String) value; break;
             case "command": cfg.command = (String) value; break;
             case "stopCommand": cfg.stopCommand = (String) value; break;
             case "exitDetectionMode": cfg.exitDetectionMode = (String) value; break;

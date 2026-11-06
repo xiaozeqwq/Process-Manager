@@ -144,6 +144,12 @@ public class ProcessManager {
         SshServerHost.disconnectInstance(instanceId);
     }
 
+    /** 主密码被修改或清除后调用：作废全部令牌与授权，强制玩家重新验证。 */
+    public static void applyPasswordChange() {
+        SessionManager.getInstance().revokeAllAuthorizations();
+        LOGGER.info("PM password changed; all existing authorizations and tokens have been revoked.");
+    }
+
     /** 在实例 SSH 配置发生变化后调用：若已有实例启用 SSH 而服务端尚未启动，则懒启动。 */
     public static void ensureEmbeddedSsh() {
         if (SshServerHost.getPort() > 0) return;
@@ -159,6 +165,7 @@ public class ProcessManager {
             sessionPurger = null;
         }
         InstanceManager.getInstance().stop();
+        serverInstance = null;
     }
 
     public static boolean isLogCommandsEnabled() {
