@@ -70,7 +70,7 @@ public class InstanceManager {
         }
         for (ProcessInstance removed : oldInstances.values()) {
             instances.remove(removed.getId());
-            removed.stop(true);
+            removed.shutdown();
         }
         if (sshReverted) {
             Config.save();
@@ -85,7 +85,7 @@ public class InstanceManager {
     }
 
     public void shutdownAll() {
-        instances.values().forEach(inst -> inst.stop(true));
+        instances.values().forEach(ProcessInstance::shutdown);
         instances.clear();
     }
 

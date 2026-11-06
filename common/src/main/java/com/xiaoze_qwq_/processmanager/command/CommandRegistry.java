@@ -29,7 +29,7 @@ public class CommandRegistry {
                 .requires(src -> src.hasPermission(0) && !isCommandBlock(src));
 
         base.then(Commands.literal("verify")
-                .then(Commands.argument("password", StringArgumentType.word())
+                .then(Commands.argument("password", StringArgumentType.greedyString())
                         .executes(CommandRegistry::executeVerify)));
 
         base.then(Commands.literal("reload").executes(CommandRegistry::executeReload));
@@ -239,8 +239,9 @@ public class CommandRegistry {
             return 0;
         }
         String pwd = StringArgumentType.getString(ctx, "password");
-        if (pwd.isEmpty()) {
-            src.sendFailure(Component.translatable("pm.set.password.empty"));
+        String invalid = validatePmPassword(pwd);
+        if (invalid != null) {
+            src.sendFailure(Component.translatable(invalid));
             return 0;
         }
         if (ProcessManager.isLogCommandsEnabled()) {
@@ -248,6 +249,7 @@ public class CommandRegistry {
             return 0;
         }
         Config.setPassword(pwd);
+        ProcessManager.applyPasswordChange();
         src.sendSuccess(() -> Component.translatable("pm.set.password.success"), false);
         return 1;
     }
@@ -259,8 +261,9 @@ public class CommandRegistry {
             return 0;
         }
         String pwd = StringArgumentType.getString(ctx, "password");
-        if (pwd.isEmpty()) {
-            src.sendFailure(Component.translatable("pm.set.password.empty"));
+        String invalid = validatePmPassword(pwd);
+        if (invalid != null) {
+            src.sendFailure(Component.translatable(invalid));
             return 0;
         }
         if (ProcessManager.isLogCommandsEnabled()) {
@@ -268,8 +271,22 @@ public class CommandRegistry {
                     + "The password will be written to the server log. Consider setting log-commands=false.");
         }
         Config.setPassword(pwd);
+        ProcessManager.applyPasswordChange();
         src.sendSuccess(() -> Component.translatable("pm.set.password.success"), false);
         return 1;
+    }
+
+    /** 校验 PM 主密码规则；合法返回 null，否则返回错误文案键。 */
+    private static String validatePmPassword(String pwd) {
+        if (pwd == null || pwd.isEmpty()) return "pm.set.password.empty";
+        if (pwd.length() < Config.MIN_PASSWORD_LENGTH || pwd.length() > Config.MAX_PASSWORD_LENGTH) {
+            return "pm.set.password.invalid_length";
+        }
+        if (!pwd.equals(pwd.trim())) return "pm.set.password.blank_edges";
+        for (int i = 0; i < pwd.length(); i++) {
+            if (Character.isWhitespace(pwd.charAt(i))) return "pm.set.password.contains_whitespace";
+        }
+        return null;
     }
 
     private static int executeUnsetPassword(CommandContext<CommandSourceStack> ctx) {
@@ -279,6 +296,7 @@ public class CommandRegistry {
             return 0;
         }
         Config.clearPassword();
+        ProcessManager.applyPasswordChange();
         src.sendSuccess(() -> Component.translatable("pm.unset.password.success"), false);
         return 1;
     }
@@ -408,6 +426,7 @@ public class CommandRegistry {
             return 1;
         }
         SessionManager.getInstance().revoke(finalUuid);
+        SessionManager.getInstance().revokeCookiesFor(finalUuid);
         src.sendSuccess(() -> Component.translatable("pm.auth.revoke.success", finalUuid), false);
         return 1;
     }
@@ -864,6 +883,7 @@ public class CommandRegistry {
             src.sendFailure(Component.literal("This public key is already configured or could not be saved."));
             return 0;
         }
+        SshServerHost.invalidateKeyCache(id);
         String fingerprint = KeyUtils.getFingerPrint(key);
         String keyType = entry.getKeyType();
         int total = Config.countSshAuthorizedKeys(id);
@@ -886,6 +906,7 @@ public class CommandRegistry {
             src.sendFailure(Component.literal("No SSH public key at index " + index + "."));
             return 0;
         }
+        SshServerHost.invalidateKeyCache(id);
         Config.InstanceConfig cfg = Config.getInstanceConfig(id);
         boolean noKeysLeft = Config.countSshAuthorizedKeys(id) == 0;
         if (noKeysLeft && cfg != null && cfg.sshEnabled

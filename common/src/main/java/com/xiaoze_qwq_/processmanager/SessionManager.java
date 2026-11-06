@@ -10,12 +10,12 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
 import java.io.Reader;
-import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -88,16 +88,29 @@ public class SessionManager {
     }
 
     private synchronized void save() {
-        try (Writer writer = new OutputStreamWriter(Files.newOutputStream(AUTH_FILE), StandardCharsets.UTF_8)) {
-            writer.write("# PM Authentication Cookies\n\n");
-            for (AuthCookie c : cookies.values()) {
-                writer.write("[[auth]]\n");
-                writer.write("uuid = \"" + c.uuid() + "\"\n");
-                writer.write("username = \"" + escape(c.username()) + "\"\n");
-                writer.write("ip = \"" + escape(c.ip()) + "\"\n");
-                writer.write("grantedAt = " + c.grantedAt() + "\n");
-                writer.write("expiresAt = " + c.expiresAt() + "\n");
-                writer.write("uid = \"" + escape(c.uid()) + "\"\n\n");
+        StringBuilder content = new StringBuilder("# PM Authentication Cookies\n\n");
+        for (AuthCookie c : cookies.values()) {
+            content.append("[[auth]]\n");
+            content.append("uuid = \"").append(c.uuid()).append("\"\n");
+            content.append("username = \"").append(escape(c.username())).append("\"\n");
+            content.append("ip = \"").append(escape(c.ip())).append("\"\n");
+            content.append("grantedAt = ").append(c.grantedAt()).append("\n");
+            content.append("expiresAt = ").append(c.expiresAt()).append("\n");
+            content.append("uid = \"").append(escape(c.uid())).append("\"\n\n");
+        }
+        try {
+            Path parent = AUTH_FILE.getParent();
+            if (parent != null) Files.createDirectories(parent);
+            Path temp = Files.createTempFile(parent, AUTH_FILE.getFileName().toString(), ".tmp");
+            try {
+                Files.write(temp, content.toString().getBytes(StandardCharsets.UTF_8));
+                try {
+                    Files.move(temp, AUTH_FILE, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                } catch (AtomicMoveNotSupportedException e) {
+                    Files.move(temp, AUTH_FILE, StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                Files.deleteIfExists(temp);
             }
         } catch (IOException e) {
             ProcessManager.LOGGER.error("Failed to save pm_auth.toml", e);
@@ -288,6 +301,17 @@ public class SessionManager {
     private void purgeRevokedTokens() {
         long now = System.currentTimeMillis();
         recentlyRevokedTokens.entrySet().removeIf(e -> now - e.getValue().revokedAt() > REVOKED_TOKEN_GRACE_MS);
+    }
+
+    /**
+     * 撤销全部令牌与授权：用于密码被修改或清除后强制所有玩家重新验证。
+     * 已签发的令牌立即失效，不再保留 5 秒宽限期。
+     */
+    public void revokeAllAuthorizations() {
+        cookieMap.clear();
+        recentlyRevokedTokens.clear();
+        cookies.clear();
+        save();
     }
 
     private String computeToken(SessionCookie cookie) {

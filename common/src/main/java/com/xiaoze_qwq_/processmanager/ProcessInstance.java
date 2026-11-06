@@ -1,10 +1,9 @@
 package com.xiaoze_qwq_.processmanager;
 
 import com.xiaoze_qwq_.processmanager.config.Config;
-import com.xiaoze_qwq_.processmanager.logging.OutputLogger;
 import com.xiaoze_qwq_.processmanager.monitor.StatusMonitor;
 import com.xiaoze_qwq_.processmanager.network.*;
-import com.xiaoze_qwq_.processmanager.util.ANSITextProcessor;
+import com.xiaoze_qwq_.processmanager.util.CommandLineTokenizer;
 import com.xiaoze_qwq_.processmanager.util.LogEntry;
 import com.xiaoze_qwq_.processmanager.util.RingBuffer;
 import com.pty4j.PtyProcess;
@@ -16,12 +15,10 @@ import org.slf4j.Logger;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Paths;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -39,7 +36,7 @@ public class ProcessInstance {
     }
 
     private final String instanceId;
-    private Config.InstanceConfig config;
+    private volatile Config.InstanceConfig config;
     private final Logger LOGGER = ProcessManager.LOGGER;
 
     // 直接写操作系统 stdout，绕过 Minecraft / 加载器的日志重定向
@@ -51,6 +48,7 @@ public class ProcessInstance {
     private final Set<ServerPlayer> statusSubscribers = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean restartScheduled = new AtomicBoolean(false);
+    private final AtomicBoolean manualStopRequested = new AtomicBoolean(false);
     private final AtomicLong currentPid = new AtomicLong(-1);
     private final ReentrantReadWriteLock processLock = new ReentrantReadWriteLock();
 
@@ -61,15 +59,18 @@ public class ProcessInstance {
     private boolean ptyMode = false;
     private ExecutorService outputReaderExecutor;
     private ScheduledExecutorService scheduler;
+    private ScheduledFuture<?> pendingRestart;
     private Thread waitForExitThread;
-    private OutputLogger outputLogger;
     private StatusMonitor statusMonitor;
 
     /** 发送停止命令的时刻（毫秒），用于 gracefulStop 模式下判定正常退出 */
     private volatile long gracefulStopSentAt = 0L;
 
     private final AtomicBoolean immersiveConsole = new AtomicBoolean(false);
-    private final AtomicInteger consoleLastPrintedIndex = new AtomicInteger(0);
+    /** 进程本次运行累计输出的行数（单调递增，重启时归零）。 */
+    private final AtomicLong emittedLines = new AtomicLong(0);
+    /** 已打印到服务端控制台的行数，用于沉浸模式补历史时避免重复。 */
+    private final AtomicLong consolePrintedLines = new AtomicLong(0);
 
     /** 通过 SSH 接入本实例控制台的订阅者。 */
     public interface ConsoleOutputListener {
@@ -80,6 +81,15 @@ public class ProcessInstance {
 
     private final Set<ConsoleOutputListener> consoleListeners = ConcurrentHashMap.newKeySet();
 
+    /** 待下发给玩家的输出行，按固定间隔合并成单个数据包发送。 */
+    private static final long OUTPUT_FLUSH_INTERVAL_MS = 50L;
+    private static final int OUTPUT_FLUSH_MAX_LINES = 64;
+    /** 状态界面超过该时长没有请求即视为已关闭，自动退订。 */
+    private static final long STATUS_SUBSCRIPTION_TIMEOUT_MS = 15_000L;
+    private final Queue<String> pendingOutput = new ConcurrentLinkedQueue<>();
+    private final Map<UUID, Long> statusRequestTimes = new ConcurrentHashMap<>();
+    private ScheduledFuture<?> outputFlushTask;
+
     // 当前操作状态
     private volatile OperationState operationState = OperationState.IDLE;
 
@@ -87,12 +97,13 @@ public class ProcessInstance {
         this.instanceId = id;
         this.config = config;
         this.outputRing = new RingBuffer<>(config.historyLimit);
-        this.outputLogger = new OutputLogger(Paths.get(config.logDirectory), config);
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "PM-" + id + "-Scheduler");
             t.setDaemon(true);
             return t;
         });
+        this.outputFlushTask = scheduler.scheduleWithFixedDelay(
+                this::flushPendingOutput, OUTPUT_FLUSH_INTERVAL_MS, OUTPUT_FLUSH_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
     // ==================== 操作状态控制 ====================
@@ -117,35 +128,35 @@ public class ProcessInstance {
     }
 
     // ==================== 进程启动/停止 ====================
+    /** 启动进程；返回是否实际拉起成功（配置缺失或启动异常时返回 false）。 */
     public boolean start() {
         if (!startOperation(OperationState.STARTING)) return false;
         try {
-            startInternal();
+            return startInternal();
         } finally {
             endOperation();
         }
-        return true;
     }
 
-    private void startInternal() {
+    private boolean startInternal() {
         processLock.writeLock().lock();
         try {
             if (running.get()) {
                 LOGGER.warn("[{}] process already running", instanceId);
-                return;
+                return false;
             }
+            cancelPendingRestart();
+            manualStopRequested.set(false);
             killPreviousProcess();
             gracefulStopSentAt = 0L;
             outputRing.clear();
-            consoleLastPrintedIndex.set(0);
-            if (outputLogger != null) outputLogger.closeAndFinalize();
-            outputLogger = new OutputLogger(Paths.get(config.logDirectory), config);
-            outputLogger.startNewLog();
+            emittedLines.set(0);
+            consolePrintedLines.set(0);
 
             List<String> command = tokenizeCommand(config.command);
             if (command.isEmpty()) {
                 LOGGER.error("[{}] No launch command configured. Set 'command' in the instance config.", instanceId);
-                return;
+                return false;
             }
 
             File workDir = null;
@@ -195,6 +206,7 @@ public class ProcessInstance {
             }
 
             LOGGER.info("[{}] process started: {}", instanceId, String.join(" ", command));
+            return true;
         } catch (IOException e) {
             LOGGER.error("[{}] Failed to start process", instanceId, e);
             running.set(false);
@@ -210,6 +222,7 @@ public class ProcessInstance {
                 try { processWriter.close(); } catch (IOException ignored) {}
                 processWriter = null;
             }
+            return false;
         } finally {
             processLock.writeLock().unlock();
         }
@@ -243,18 +256,13 @@ public class ProcessInstance {
             while (!Thread.currentThread().isInterrupted() && (line = reader.readLine()) != null) {
                 long now = System.currentTimeMillis();
                 String raw = line;
-                String plain = ANSITextProcessor.toPlainText(raw);
                 outputRing.add(new LogEntry(raw, now));
-                processLock.readLock().lock();
-                try {
-                    if (outputLogger != null) outputLogger.writeLine(plain);
-                } finally {
-                    processLock.readLock().unlock();
-                }
+                emittedLines.incrementAndGet();
                 if (immersiveConsole.get()) {
                     printToConsole(raw, now);
+                    consolePrintedLines.incrementAndGet();
                 }
-                broadcastToSubscribers(raw);
+                queueForSubscribers(raw);
             }
         } catch (IOException e) {
             if (running.get()) LOGGER.error("[{}] Output reader error", instanceId, e);
@@ -298,15 +306,14 @@ public class ProcessInstance {
         int len = bytes.length;
         if (bytes[len - 1] == '\r') len--;
         String raw = new String(bytes, 0, len, StandardCharsets.UTF_8);
-        String plain = ANSITextProcessor.toPlainText(raw);
         long now = System.currentTimeMillis();
         outputRing.add(new LogEntry(raw, now));
-        processLock.readLock().lock();
-        try {
-            if (outputLogger != null) outputLogger.writeLine(plain);
-        } finally {
-            processLock.readLock().unlock();
+        emittedLines.incrementAndGet();
+        if (immersiveConsole.get()) {
+            printToConsole(raw, now);
+            consolePrintedLines.incrementAndGet();
         }
+        queueForSubscribers(raw);
     }
 
     public boolean isSshEnabled() { return config.sshEnabled; }
@@ -380,28 +387,31 @@ public class ProcessInstance {
     private void handleProcessExit(int exitCode) {
         awaitOutputReader();
         notifyConsoleClosed(exitCode);
+        Config.InstanceConfig snapshot = config;
+        boolean manualStop = manualStopRequested.get();
         boolean normalExit;
-        if ("gracefulStop".equalsIgnoreCase(config.exitDetectionMode)) {
+        if (manualStop) {
+            normalExit = true;
+            LOGGER.info("[{}] Manual stop requested, exit code {} is expected.", instanceId, exitCode);
+        } else if ("gracefulStop".equalsIgnoreCase(snapshot.exitDetectionMode)) {
             long sentAt = gracefulStopSentAt;
             normalExit = sentAt > 0L
-                    && (System.currentTimeMillis() - sentAt) <= config.gracefulStopTimeoutSeconds * 1000L;
+                    && (System.currentTimeMillis() - sentAt) <= snapshot.gracefulStopTimeoutSeconds * 1000L;
             LOGGER.info("[{}] Graceful-stop exit check: normalExit={}", instanceId, normalExit);
         } else {
-            normalExit = exitCode == config.exitCode;
+            normalExit = exitCode == snapshot.exitCode;
         }
         gracefulStopSentAt = 0L;
         cleanupAfterExit();
         if (normalExit) {
             LOGGER.info("[{}] Normal exit detected, not restarting.", instanceId);
-            closeLogger();
             sendInstanceRemovedPacket();
             return;
         }
-        if (config.autoRestart) {
+        if (snapshot.autoRestart) {
             LOGGER.info("[{}] Auto-restarting in 3s...", instanceId);
             scheduleRestart();
         } else {
-            closeLogger();
             sendInstanceRemovedPacket();
         }
     }
@@ -455,29 +465,32 @@ public class ProcessInstance {
         ProcessManager.sendToAllPlayers(new InstanceRemovedPacket(instanceId));
     }
 
-    private void closeLogger() {
-        processLock.writeLock().lock();
-        try {
-            if (outputLogger != null) {
-                try {
-                    outputLogger.closeAndFinalize();
-                } catch (Exception e) {
-                    LOGGER.error("[{}] Error closing logger", instanceId, e);
-                }
-                outputLogger = null;
+    private void scheduleRestart() {
+        if (isSchedulerShutdown()) return;
+        if (restartScheduled.compareAndSet(false, true)) {
+            try {
+                pendingRestart = scheduler.schedule(() -> {
+                    restartScheduled.set(false);
+                    pendingRestart = null;
+                    if (!running.get() && !manualStopRequested.get() && !isSchedulerShutdown()) start();
+                }, 3, TimeUnit.SECONDS);
+            } catch (RejectedExecutionException e) {
+                restartScheduled.set(false);
+                pendingRestart = null;
+                LOGGER.warn("[{}] Scheduler is shut down; auto-restart skipped.", instanceId);
             }
-        } finally {
-            processLock.writeLock().unlock();
         }
     }
 
-    private void scheduleRestart() {
-        if (restartScheduled.compareAndSet(false, true)) {
-            scheduler.schedule(() -> {
-                restartScheduled.set(false);
-                if (!running.get()) start();
-            }, 3, TimeUnit.SECONDS);
-        }
+    private void cancelPendingRestart() {
+        ScheduledFuture<?> pending = pendingRestart;
+        pendingRestart = null;
+        restartScheduled.set(false);
+        if (pending != null) pending.cancel(false);
+    }
+
+    private boolean isSchedulerShutdown() {
+        return scheduler.isShutdown();
     }
 
     public void stop(boolean sendExit) {
@@ -489,71 +502,92 @@ public class ProcessInstance {
         }
     }
 
+    /**
+     * 停止进程。锁只保护状态切换与流引用，等待进程退出在锁外完成，
+     * 避免长时间持锁阻塞输出读取线程导致管道写满。
+     */
     private void stopInternal(boolean sendExit, boolean broadcastRemoved) {
+        Process target;
+        BufferedWriter writer;
+        InputStream input;
+        ExecutorService reader;
+        Thread waitThread;
+        String stopCommand;
+        boolean stopCommandSent = false;
         processLock.writeLock().lock();
         try {
             if (!running.get() && process == null) return;
-            // 1. 先置停止标志，使输出读取循环尽快退出
             running.set(false);
-
-            // 2. 终止进程，使输出流自然关闭
-            if (sendExit && processWriter != null && process != null && process.isAlive()
-                    && config.stopCommand != null && !config.stopCommand.isBlank()) {
+            manualStopRequested.set(true);
+            cancelPendingRestart();
+            target = process;
+            writer = processWriter;
+            input = processInputStream;
+            reader = outputReaderExecutor;
+            waitThread = waitForExitThread;
+            stopCommand = config.stopCommand;
+            if (sendExit && writer != null && target != null && target.isAlive()
+                    && stopCommand != null && !stopCommand.isBlank()) {
+                gracefulStopSentAt = System.currentTimeMillis();
                 try {
-                    gracefulStopSentAt = System.currentTimeMillis();
-                    processWriter.write(config.stopCommand);
-                    processWriter.newLine();
-                    processWriter.flush();
-                    long giveUp = System.currentTimeMillis() + 5000;
-                    while (process.isAlive() && System.currentTimeMillis() < giveUp) Thread.sleep(100);
-                    if (process.isAlive()) process.destroy();
-                } catch (Exception e) {
-                    process.destroy();
-                }
-            } else {
-                if (process != null && process.isAlive()) {
-                    process.destroy();
+                    writer.write(stopCommand);
+                    writer.newLine();
+                    writer.flush();
+                    stopCommandSent = true;
+                } catch (IOException e) {
+                    LOGGER.warn("[{}] Failed to send stop command", instanceId, e);
                 }
             }
-            if (process != null && process.isAlive()) {
-                try { process.waitFor(2, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
-                if (process.isAlive()) {
-                    process.destroyForcibly();
-                    try { process.waitFor(5, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
-                }
-            }
-
-            // 3. 关闭输出输入流，解除 readLine 阻塞
-            if (processInputStream != null) {
-                try { processInputStream.close(); } catch (IOException ignored) {}
-                processInputStream = null;
-            }
-
-            // 4. 关闭输出读取线程池并等待最多 1 秒
-            if (outputReaderExecutor != null) {
-                outputReaderExecutor.shutdownNow();
-                try { outputReaderExecutor.awaitTermination(1, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
-                outputReaderExecutor = null;
-            }
-
-            if (waitForExitThread != null) {
-                waitForExitThread.interrupt();
-                waitForExitThread = null;
-            }
-            if (processWriter != null) {
-                try { processWriter.close(); } catch (IOException ignored) {}
-                processWriter = null;
-            }
-
-            immersiveSubscribers.clear();
-            statusSubscribers.clear();
-            currentPid.set(-1);
-            closeLogger();
-            if (statusMonitor != null) statusMonitor.stop();
-            if (broadcastRemoved) sendInstanceRemovedPacket();
         } finally {
             processLock.writeLock().unlock();
         }
+
+        if (target != null) {
+            try {
+                if (!stopCommandSent) target.destroy();
+                if (!target.waitFor(5, TimeUnit.SECONDS) && target.isAlive()) {
+                    target.destroy();
+                    if (!target.waitFor(2, TimeUnit.SECONDS) && target.isAlive()) {
+                        target.destroyForcibly();
+                        target.waitFor(5, TimeUnit.SECONDS);
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        if (input != null) {
+            try { input.close(); } catch (IOException ignored) {}
+        }
+        if (reader != null) {
+            reader.shutdownNow();
+            try { reader.awaitTermination(1, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+        }
+        if (waitThread != null) waitThread.interrupt();
+        if (writer != null) {
+            try { writer.close(); } catch (IOException ignored) {}
+        }
+
+        processLock.writeLock().lock();
+        try {
+            if (processInputStream == input) processInputStream = null;
+            if (outputReaderExecutor == reader) outputReaderExecutor = null;
+            if (waitForExitThread == waitThread) waitForExitThread = null;
+            if (processWriter == writer) processWriter = null;
+            processRawOutput = null;
+            ptyMode = false;
+            if (process == target) process = null;
+            immersiveSubscribers.clear();
+            statusSubscribers.clear();
+            statusRequestTimes.clear();
+            currentPid.set(-1);
+        } finally {
+            processLock.writeLock().unlock();
+        }
+        StatusMonitor monitor = statusMonitor;
+        if (monitor != null) monitor.stop();
+        if (broadcastRemoved) sendInstanceRemovedPacket();
     }
 
     public void restart() {
@@ -598,8 +632,13 @@ public class ProcessInstance {
         }
         immersiveSubscribers.put(player, canInput);
         List<LogEntry> history = outputRing.getLast(Math.min(200, outputRing.size()));
-        for (LogEntry entry : history) {
-            ProcessManager.sendToPlayer(player, new OutputPacket(instanceId, entry.message));
+        if (!history.isEmpty()) {
+            StringBuilder batch = new StringBuilder();
+            for (LogEntry entry : history) {
+                if (batch.length() > 0) batch.append('\n');
+                batch.append(entry.message);
+            }
+            ProcessManager.sendToPlayer(player, new OutputPacket(instanceId, batch.toString()));
         }
         ProcessManager.sendToPlayer(player, new ImmersiveStatusPacket(instanceId, true, canInput));
     }
@@ -617,40 +656,69 @@ public class ProcessInstance {
         return Boolean.TRUE.equals(immersiveSubscribers.get(player));
     }
 
+    /** 状态订阅：记录最后一次请求时间，超时无请求会被自动移除。 */
     public void addStatusSubscriber(ServerPlayer player) {
+        statusRequestTimes.put(player.getUUID(), System.currentTimeMillis());
         statusSubscribers.add(player);
     }
 
     public void removeStatusSubscriber(ServerPlayer player) {
+        statusRequestTimes.remove(player.getUUID());
         statusSubscribers.remove(player);
     }
 
     public void broadcastStatus() {
+        long now = System.currentTimeMillis();
         if (statusSubscribers.isEmpty()) return;
         StatusDataPacket pkt = buildStatusPacket();
         ProcessManager.executeOnServerThread(() -> {
             for (ServerPlayer player : List.copyOf(statusSubscribers)) {
-                if (player.isRemoved()) statusSubscribers.remove(player);
-                else NetworkManager.sendToPlayer(player, pkt);
+                Long lastRequest = statusRequestTimes.get(player.getUUID());
+                if (player.isRemoved()
+                        || lastRequest == null
+                        || now - lastRequest > STATUS_SUBSCRIPTION_TIMEOUT_MS) {
+                    removeStatusSubscriber(player);
+                    continue;
+                }
+                NetworkManager.sendToPlayer(player, pkt);
             }
         });
     }
 
     private StatusDataPacket buildStatusPacket() {
         boolean running = isRunning();
-        String uptime = statusMonitor != null ? statusMonitor.getUptimeFormatted() : "N/A";
-        double cpu = statusMonitor != null ? statusMonitor.getCpuUsage() : -1;
-        long mem = statusMonitor != null ? statusMonitor.getMemoryMB() : -1;
-        double down = statusMonitor != null ? statusMonitor.getDownloadSpeedKBps() : -1;
-        double up = statusMonitor != null ? statusMonitor.getUploadSpeedKBps() : -1;
-        long rx = statusMonitor != null ? statusMonitor.getTotalRxMB() : -1;
-        long tx = statusMonitor != null ? statusMonitor.getTotalTxMB() : -1;
-        return new StatusDataPacket(instanceId, running, uptime, cpu, mem, down, up, rx, tx);
+        Config.InstanceConfig snapshot = config;
+        StatusMonitor monitor = statusMonitor;
+        String uptime = monitor != null ? monitor.getUptimeFormatted() : "N/A";
+        double cpu = monitor != null ? monitor.getCpuUsage() : -1;
+        long mem = monitor != null ? monitor.getMemoryMB() : -1;
+        double down = monitor != null ? monitor.getDownloadSpeedKBps() : -1;
+        double up = monitor != null ? monitor.getUploadSpeedKBps() : -1;
+        long rx = monitor != null ? monitor.getTotalRxMB() : -1;
+        long tx = monitor != null ? monitor.getTotalTxMB() : -1;
+        return new StatusDataPacket(instanceId, running, uptime, cpu, mem, down, up, rx, tx, snapshot.chartMaxPoints);
     }
 
-    private void broadcastToSubscribers(String raw) {
+    /** 把一行输出放入待发送队列，由定时任务按批次合并下发。 */
+    private void queueForSubscribers(String raw) {
         if (immersiveSubscribers.isEmpty()) return;
-        OutputPacket pkt = new OutputPacket(instanceId, raw);
+        if (pendingOutput.size() >= OUTPUT_FLUSH_MAX_LINES * 4) {
+            pendingOutput.poll();
+        }
+        pendingOutput.add(raw);
+    }
+
+    /** 定时把积压的输出合并成一条数据包发送，最多每次 64 行。 */
+    private void flushPendingOutput() {
+        if (pendingOutput.isEmpty()) return;
+        List<String> batch = new ArrayList<>(OUTPUT_FLUSH_MAX_LINES);
+        String line;
+        while (batch.size() < OUTPUT_FLUSH_MAX_LINES && (line = pendingOutput.poll()) != null) {
+            batch.add(line);
+        }
+        if (batch.isEmpty()) return;
+        String payload = String.join("\n", batch);
+        OutputPacket pkt = new OutputPacket(instanceId, payload);
         ProcessManager.executeOnServerThread(() -> {
             for (ServerPlayer player : List.copyOf(immersiveSubscribers.keySet())) {
                 if (player.isRemoved()) immersiveSubscribers.remove(player);
@@ -674,10 +742,12 @@ public class ProcessInstance {
     private void printHistoryToConsole() {
         CompletableFuture.runAsync(() -> {
             List<LogEntry> all = outputRing.getLast(outputRing.size());
-            int last = consoleLastPrintedIndex.get();
-            if (last >= all.size()) return;
-            all.subList(last, all.size()).forEach(e -> printToConsole(e.message, e.timestamp));
-            consoleLastPrintedIndex.set(all.size());
+            long printed = consolePrintedLines.get();
+            long pending = emittedLines.get() - printed;
+            if (pending <= 0 || all.isEmpty()) return;
+            int from = (int) Math.max(0, all.size() - pending);
+            all.subList(from, all.size()).forEach(e -> printToConsole(e.message, e.timestamp));
+            consolePrintedLines.addAndGet(pending);
         });
     }
 
@@ -724,10 +794,41 @@ public class ProcessInstance {
     public void removeDisconnectedPlayer(UUID uuid) {
         immersiveSubscribers.keySet().removeIf(p -> p.getUUID().equals(uuid));
         statusSubscribers.removeIf(p -> p.getUUID().equals(uuid));
+        statusRequestTimes.remove(uuid);
     }
 
     public void resizeBuffer(int newSize) {
         outputRing.resize(newSize);
+    }
+
+    /** 关闭实例持有的调度器与输出读线程，供服务器停止或实例移除时调用。 */
+    public void shutdown() {
+        manualStopRequested.set(true);
+        cancelPendingRestart();
+        if (outputFlushTask != null) {
+            outputFlushTask.cancel(false);
+            outputFlushTask = null;
+        }
+        try {
+            stopInternal(false, false);
+        } catch (Exception e) {
+            LOGGER.warn("[{}] Error while stopping instance during shutdown", instanceId, e);
+        }
+        pendingOutput.clear();
+        immersiveSubscribers.clear();
+        statusSubscribers.clear();
+        statusRequestTimes.clear();
+        shutdownExecutor(scheduler);
+    }
+
+    private static void shutdownExecutor(ExecutorService executor) {
+        if (executor == null) return;
+        executor.shutdownNow();
+        try {
+            executor.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     public void updateConfig(Config.InstanceConfig newConfig) {
@@ -735,14 +836,6 @@ public class ProcessInstance {
         try {
             this.config = newConfig;
             resizeBuffer(newConfig.historyLimit);
-            OutputLogger oldLogger = outputLogger;
-            if (oldLogger != null) {
-                oldLogger.closeAndFinalize();
-            }
-            outputLogger = new OutputLogger(Paths.get(newConfig.logDirectory), newConfig);
-            if (running.get()) {
-                outputLogger.startNewLog();
-            }
         } finally {
             processLock.writeLock().unlock();
         }
@@ -752,38 +845,6 @@ public class ProcessInstance {
      * 将启动命令字符串拆分为参数列表，支持单引号与双引号包裹含空格的参数。
      */
     public static List<String> tokenizeCommand(String command) {
-        List<String> tokens = new ArrayList<>();
-        if (command == null) return tokens;
-        StringBuilder current = new StringBuilder();
-        boolean inSingle = false;
-        boolean inDouble = false;
-        boolean tokenStarted = false;
-        for (int i = 0; i < command.length(); i++) {
-            char c = command.charAt(i);
-            if (inSingle) {
-                if (c == '\'') inSingle = false;
-                else current.append(c);
-            } else if (inDouble) {
-                if (c == '"') inDouble = false;
-                else if (c == '\\' && i + 1 < command.length()) current.append(command.charAt(++i));
-                else current.append(c);
-            } else if (c == '\'') {
-                inSingle = true;
-                tokenStarted = true;
-            } else if (c == '"') {
-                inDouble = true;
-                tokenStarted = true;
-            } else if (Character.isWhitespace(c)) {
-                if (tokenStarted || current.length() > 0) {
-                    tokens.add(current.toString());
-                    current.setLength(0);
-                    tokenStarted = false;
-                }
-            } else {
-                current.append(c);
-            }
-        }
-        if (tokenStarted || current.length() > 0) tokens.add(current.toString());
-        return tokens;
+        return CommandLineTokenizer.tokenize(command);
     }
 }

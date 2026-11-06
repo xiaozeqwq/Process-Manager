@@ -33,8 +33,8 @@ public class ClientAutoLoginHandler {
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.getConnection() == null) return;
         autoLoginSent = true;
-        String serverAddress = ClientCookieStorage.currentServerAddress();
-        String token = ClientCookieStorage.loadCookie(serverAddress);
+        String accountKey = ClientCookieStorage.currentAccountKey();
+        String token = ClientCookieStorage.loadCookie(accountKey);
         if (token == null) return;
         String deviceId = ClientCookieStorage.getOrCreateDeviceId();
         NetworkManager.sendToServer(new CookieAuthPacket(token, deviceId));

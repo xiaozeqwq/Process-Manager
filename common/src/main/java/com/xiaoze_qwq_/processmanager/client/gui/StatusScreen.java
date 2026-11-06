@@ -1,8 +1,8 @@
 package com.xiaoze_qwq_.processmanager.client.gui;
 
-import com.xiaoze_qwq_.processmanager.config.Config;
 import com.xiaoze_qwq_.processmanager.network.StatusDataPacket;
 import com.xiaoze_qwq_.processmanager.network.StatusRequestPacket;
+import com.xiaoze_qwq_.processmanager.network.StatusUnsubscribePacket;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
@@ -39,20 +39,7 @@ public class StatusScreen extends Screen {
     public StatusScreen(String instanceId) {
         super(Component.translatable("pm.status.window_title"));
         this.instanceId = instanceId;
-        this.lastChartMaxPoints = readChartMaxPoints(instanceId);
         this.dataTracker = new ChartDataTracker(lastChartMaxPoints);
-    }
-
-    /** 从实例配置读取图表点数上限，失败时回退到默认值 */
-    private static int readChartMaxPoints(String instanceId) {
-        try {
-            Config.InstanceConfig cfg = Config.getInstanceConfig(instanceId);
-            if (cfg != null && cfg.chartMaxPoints >= 10) {
-                return cfg.chartMaxPoints;
-            }
-        } catch (Throwable ignored) {
-        }
-        return DEFAULT_CHART_MAX_POINTS;
     }
 
     public String getInstanceId() {
@@ -84,14 +71,16 @@ public class StatusScreen extends Screen {
 
     @Override
     public void tick() {
-        // 配置更新时调整图表容量（保留最新数据）
-        int current = readChartMaxPoints(instanceId);
-        if (current != lastChartMaxPoints) {
-            lastChartMaxPoints = current;
-            dataTracker.resize(current);
-        }
         if (System.currentTimeMillis() - lastRequestTime >= REFRESH_SECONDS * 1000L)
             requestStatus();
+    }
+
+    @Override
+    public void onClose() {
+        if (Minecraft.getInstance().getConnection() != null) {
+            NetworkManager.sendToServer(new StatusUnsubscribePacket(instanceId));
+        }
+        super.onClose();
     }
 
     private void requestStatus() {
@@ -109,6 +98,14 @@ public class StatusScreen extends Screen {
         this.currentUpload = data.uploadSpeedKBps();
         this.totalRxMB = data.totalRxMB();
         this.totalTxMB = data.totalTxMB();
+        int chartMaxPoints = data.chartMaxPoints();
+        if (chartMaxPoints >= 10 && chartMaxPoints != lastChartMaxPoints) {
+            lastChartMaxPoints = chartMaxPoints;
+            dataTracker.resize(chartMaxPoints);
+        } else if (chartMaxPoints < 10 && lastChartMaxPoints != DEFAULT_CHART_MAX_POINTS) {
+            lastChartMaxPoints = DEFAULT_CHART_MAX_POINTS;
+            dataTracker.resize(DEFAULT_CHART_MAX_POINTS);
+        }
         if (mccRunning) dataTracker.addDataPoint(currentDownload, currentUpload, currentCpu, currentMemory);
     }
 

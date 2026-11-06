@@ -39,6 +39,16 @@ public class ClientCookieStorage {
         return "local";
     }
 
+    /**
+     * 当前本地账号在该服务器下的存储键：玩家 UUID + 服务器地址。
+     * 令牌按账号隔离，避免同一客户端上不同账号互相复用授权。
+     */
+    public static String currentAccountKey() {
+        Minecraft mc = Minecraft.getInstance();
+        String uuid = mc.player != null ? mc.player.getUUID().toString() : "unknown";
+        return uuid + "@" + currentServerAddress();
+    }
+
     /** 读取或创建全局设备标识（UUID），文件权限设置为 600 */
     public static String getOrCreateDeviceId() {
         Path file = deviceFile();

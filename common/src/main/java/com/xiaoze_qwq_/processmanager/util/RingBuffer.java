@@ -12,8 +12,8 @@ public class RingBuffer<T> {
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
     public RingBuffer(int capacity) {
-        this.capacity = capacity;
-        this.buffer = new Object[capacity];
+        this.capacity = Math.max(1, capacity);
+        this.buffer = new Object[this.capacity];
     }
 
     public void add(T item) {
@@ -60,15 +60,20 @@ public class RingBuffer<T> {
         lock.writeLock().lock();
         try {
             if (newCapacity == capacity) return;
+            if (newCapacity <= 0) {
+                newCapacity = 1;
+            }
             Object[] newBuffer = new Object[newCapacity];
             int oldSize = size;
             int start = (writePos - oldSize + capacity) % capacity;
-            for (int i = 0; i < oldSize; i++) {
-                newBuffer[i] = buffer[(start + i) % capacity];
+            int keep = Math.min(oldSize, newCapacity);
+            int skip = oldSize - keep;
+            for (int i = 0; i < keep; i++) {
+                newBuffer[i] = buffer[(start + skip + i) % capacity];
             }
-            this.buffer = newBuffer;  // 现在可以赋值
+            this.buffer = newBuffer;
             this.capacity = newCapacity;
-            this.size = Math.min(oldSize, newCapacity);
+            this.size = keep;
             this.writePos = this.size % capacity;
         } finally {
             lock.writeLock().unlock();
