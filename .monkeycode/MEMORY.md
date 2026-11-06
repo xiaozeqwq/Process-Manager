@@ -124,3 +124,23 @@ Entries discovered by the Agent during task execution should follow this format:
 - Instructions:
   - 在 fabric/neoforge 的 implementation 与 shadow 中都声明 `net.i2p.crypto:eddsa:0.3.0`
   - `net.i2p.crypto` 不要重定位：MINA 通过固定类名 `net.i2p.crypto.eddsa.EdDSASecurityProvider` 反射加载该提供者
+
+[CI 触发与合并流程]
+- Date: 2026-11-06
+- Context: 修复分支需要 CI 验证后合并到 master 并发布 1.0.12
+- Category: Workflow & Collaboration
+- Instructions:
+  - `.github/workflows/build.yml` 只在 push 到 `master`/`main` 或 `pull_request` 时触发；功能分支必须开 PR 才会跑 CI
+  - 环境未登录 `gh`，但 `git config credential.helper`（`/app/agent/bin/agent git-credential-helper`）可提供 GitHub 令牌，用 `git credential fill` 取凭据后走 REST API 建 PR、查 runs/jobs、合并
+  - CI 任务依赖链为 `compile-common → test-common → build-fabric/build-neoforge → release`；`release` 仅在 push 到 `master`/`main` 时执行
+  - 合并 master 后需确认 `release` job 成功，并在 `/releases/tags/v<version>` 核对 6 个资产齐全
+
+[common 单元测试执行方式]
+- Date: 2026-11-06
+- Context: 为 RingBuffer 与命令行分词补充测试并在 CI 中执行
+- Category: Build Methods
+- Instructions:
+  - 测试源码位于 `common/src/test/java`，使用 JUnit Jupiter（BOM `org.junit:junit-bom:6.1.3`）
+  - 本地无 JDK 时不要尝试本地构建，执行方式为 `./gradlew :common:test`，由 CI 的 `test-common` job 运行
+  - `common/build.gradle` 需保留 `tasks.named('test', Test) { useJUnitPlatform() }`
+
