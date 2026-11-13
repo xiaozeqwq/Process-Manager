@@ -1,6 +1,6 @@
 # Changelog
 
-Process Manager（原 MCC In Server）全量版本对账，范围 `v1.0.0` → `v1.0.11`。
+Process Manager（原 MCC In Server）全量版本对账，范围 `v1.0.0` → `v1.0.13`。
 
 数据来源：`git log` / `git diff` / tag 树 / GitHub Actions run 记录 / Release 资产清单。
 
@@ -18,6 +18,8 @@ Process Manager（原 MCC In Server）全量版本对账，范围 `v1.0.0` → `
 | v1.0.9 | `0f855a2` | 2026-10-25 | 1 | 3 | +13 / -3 |
 | v1.0.10 | `a4058e8` | 2026-10-28 | 1 | 10 | +767 / -102 |
 | v1.0.11 | `25037e0` | 2026-10-29 | 1 | 2 | +4 / -3 |
+| v1.0.12 | — | 2026-11-06 | 1 | 6 | 见下文 |
+| v1.0.13 | — | 2026-11-13 | 待发布 | 15 | 见下文 |
 
 ---
 
@@ -190,6 +192,33 @@ Process Manager（原 MCC In Server）全量版本对账，范围 `v1.0.0` → `
 
 **breaking**
 - 不再生成 `output/*.log` 及归档文件
+
+---
+
+## v1.0.13 — SSH TUI 管理菜单 + 密码哈希算法模块化
+
+**feat**
+- 新增 SSH 保留用户名 `menu`：用独立菜单密码登录后进入全屏 TUI 实例管理菜单（ANSI 边框/颜色/反色选中，方向键导航，非纯命令行）
+  - 菜单能力：实例列表（状态/PID/SSH 标记）、启动/停止/重启/强制停止（危险操作二次确认）、状态总览（CPU/内存/运行时长，1s 自动刷新）、向实例 stdin 发送命令
+  - 控制台桥接：实例启用 SSH 且运行中时，从菜单直接接入其实时 PTY 控制台，`Ctrl-A` `d` 返回菜单，实例退出自动回菜单
+  - 安全边界：菜单内没有任何密码修改入口，实例密码/菜单自身密码/主密码均只能由服务器控制台管理；菜单密码独立存储于 `pm_config.toml` 的 `[menu] passwordHash`
+  - 新命令：`/pm menu status`、`/pm menu setpassword <pw>`（仅控制台）、`/pm menu clearpassword`（仅控制台）；`menu` 会话计入限流与会话上限，审计事件 `menu_action` 仅记录动作与目标实例
+- 密码哈希算法模块化：新增 `crypto` 包，`PasswordCipher` 接口 + 注册表，覆盖主密码/实例 SSH 密码/菜单密码
+  - 内置 `bcrypt`（$2b$，cost 12）与 `pbkdf2-sha512`（新格式带前缀，兼容校验旧版无前缀 `iterations$salt$hash` 的 pmpassword）
+  - 外部算法模块通过 Java SPI 独立 jar 接入，放入 `mods/` 自动注册；模块开发规范见 `skills/crypto-module/SKILL.md`
+  - 新配置 `[hashing] algorithm`（默认 bcrypt）决定新密码用哪个算法；校验按存储格式自动识别，旧哈希平滑兼容
+  - 新命令：`/pm hash list`、`/pm hash set <算法>`（仅控制台）
+
+**fix**
+- 配置加载时拒绝名为 `menu`（不区分大小写）的实例，避免与保留 SSH 用户名冲突
+- 菜单未匹配任何实例（含回退默认实例）时不再误入实例认证路径
+
+**build**
+- `common` 测试新增 bcrypt 运行时依赖；新增 `PasswordCipherRegistryTest`、`MenuKeyDecoderTest`
+- `mod_version 1.0.12 → 1.0.13`
+
+**breaking**
+- 无（旧配置、旧密码哈希全部兼容）
 
 ---
 

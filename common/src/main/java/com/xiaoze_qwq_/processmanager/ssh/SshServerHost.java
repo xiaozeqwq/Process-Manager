@@ -4,6 +4,7 @@ import com.xiaoze_qwq_.processmanager.InstanceManager;
 import com.xiaoze_qwq_.processmanager.ProcessInstance;
 import com.xiaoze_qwq_.processmanager.ProcessManager;
 import com.xiaoze_qwq_.processmanager.config.Config;
+import com.xiaoze_qwq_.processmanager.crypto.PasswordCipherRegistry;
 import dev.architectury.platform.Platform;
 import org.apache.sshd.core.CoreModuleProperties;
 import org.apache.sshd.server.SshServer;
@@ -41,7 +42,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 内嵌 SSH 服务端。仅监听回环地址，外网流量由 {@link ProtocolSniffHandler}
  * 从 Minecraft 端口嗅探后桥接进来。客户端以实例编号或实例名称作为用户名，
- * 认证方式由目标实例配置决定（密码或公钥）；登录后直接接入该实例的控制台，
+ * 认证方式由目标实例配置决定（密码或公钥）；登录后直接接入该实例的控制台。
+ * 保留用户名 "menu" 使用独立菜单密码认证，登录后进入 TUI 实例管理菜单。
  * 不提供 shell、命令执行或端口转发。
  */
 public final class SshServerHost {
@@ -51,6 +53,8 @@ public final class SshServerHost {
     private static final Object DUMMY_LOCK = new Object();
     private static final AttributeRepository.AttributeKey<String> SESSION_INSTANCE_ID =
             new AttributeRepository.AttributeKey<>();
+    /** 菜单会话在会话跟踪表中的“实例 ID”占位值；真实实例 ID 均为纯数字，不会冲突。 */
+    public static final String MENU_SESSION_ID = "menu";
     private static volatile String dummyHash;
 
     private static SshServerHost instance;
@@ -69,7 +73,7 @@ public final class SshServerHost {
 
     public static synchronized void start() throws IOException {
         if (instance != null) return;
-        if (!Config.hasEnabledSshInstance()) return;
+        if (!Config.isSshServerNeeded()) return;
         SshServerHost host = new SshServerHost();
         try {
             host.doStart();
@@ -171,13 +175,18 @@ public final class SshServerHost {
             return false;
         }
 
+        // 保留用户名 menu：优先于实例解析，进入独立菜单认证路径
+        if (Config.isMenuUsername(username)) {
+            return authenticateMenuPassword(password, session);
+        }
+
         Config.InstanceConfig cfg = Config.findSshInstanceWithFallback(username);
         String candidate = password == null ? "" : password;
         boolean passwordMode = cfg != null
                 && cfg.sshEnabled
                 && Config.SSH_AUTH_PASSWORD.equals(Config.normalizeSshAuthMode(cfg.sshAuthMode));
         if (!passwordMode || cfg.sshPasswordHash == null || cfg.sshPasswordHash.isEmpty()) {
-            Config.bcryptVerify(candidate, dummyHash());
+            PasswordCipherRegistry.verify(candidate, dummyHash());
             if (cfg == null) SshGuard.recordFailure(ip);
             SshAudit.authFail(ip, cfg == null ? null : cfg.id,
                     cfg == null ? "unknown_instance" : "auth_mode_mismatch");
@@ -209,10 +218,56 @@ public final class SshServerHost {
         return true;
     }
 
+    /**
+     * 菜单用户名认证：使用独立菜单密码（服务器控制台设置），与实例密码、
+     * 主密码完全隔离。菜单未启用时同样消耗哈希以均衡耗时，避免探测。
+     */
+    private boolean authenticateMenuPassword(String password, ServerSession session) {
+        String ip = peerIp(session);
+        String candidate = password == null ? "" : password;
+        if (!Config.hasMenuPassword()) {
+            PasswordCipherRegistry.verify(candidate, dummyHash());
+            SshGuard.recordFailure(ip);
+            SshAudit.authFail(ip, MENU_SESSION_ID, "menu_disabled");
+            return false;
+        }
+        if (!SshGuard.acquireBcrypt()) {
+            SshAudit.authFail(ip, MENU_SESSION_ID, "auth_busy");
+            return false;
+        }
+        boolean ok;
+        try {
+            ok = Config.verifyMenuPassword(candidate);
+        } finally {
+            SshGuard.releaseBcrypt();
+        }
+        if (!ok) {
+            SshGuard.recordFailure(ip);
+            SshAudit.authFail(ip, MENU_SESSION_ID, "bad_password");
+            return false;
+        }
+        if (!registerSession(session, MENU_SESSION_ID, ip)) {
+            SshAudit.authFail(ip, MENU_SESSION_ID, "session_limit");
+            return false;
+        }
+        session.setAttribute(SESSION_INSTANCE_ID, MENU_SESSION_ID);
+        SshGuard.recordSuccess(ip);
+        SshAudit.authOk(ip, MENU_SESSION_ID);
+        return true;
+    }
+
     private boolean authenticatePublicKey(String username, PublicKey key, ServerSession session) {
         String ip = peerIp(session);
         if (SshGuard.isLocked(ip)) {
             SshAudit.authFail(ip, null, "locked");
+            return false;
+        }
+
+        // 菜单仅支持密码认证，公钥尝试一律拒绝并计入失败
+        if (Config.isMenuUsername(username)) {
+            SshGuard.recordFailure(ip);
+            SshAudit.authFail(ip, MENU_SESSION_ID, "menu_password_only");
+            closeIfLocked(ip, session);
             return false;
         }
 
@@ -337,6 +392,8 @@ public final class SshServerHost {
     private void doDisconnectDisabledInstances() {
         for (Session session : new ArrayList<>(sessions)) {
             String instanceId = sessionInstances.get(session);
+            // 菜单会话不绑定实例，仅由菜单密码清除流程断开
+            if (MENU_SESSION_ID.equals(instanceId)) continue;
             Config.InstanceConfig cfg = instanceId == null ? null : Config.getInstanceConfig(instanceId);
             if (cfg != null && cfg.sshEnabled) continue;
             releaseTracking(session);
@@ -365,13 +422,14 @@ public final class SshServerHost {
         if (value != null) return value;
         synchronized (DUMMY_LOCK) {
             if (dummyHash == null) {
-                dummyHash = Config.bcryptHash("pm-dummy-" + UUID.randomUUID());
+                dummyHash = PasswordCipherRegistry.hash("pm-dummy-" + UUID.randomUUID());
             }
             return dummyHash;
         }
     }
 
-    private static String peerIp(Session session) {
+    /** 桥接场景下把回环端口映射为真实客户端 IP；包内可见供菜单命令复用。 */
+    static String peerIp(Session session) {
         if (session == null) return "unknown";
         try {
             SocketAddress address = session.getRemoteAddress();
@@ -434,7 +492,7 @@ public final class SshServerHost {
         }
     }
 
-    /** 仅允许交互式 shell 请求接入用户名指定实例的控制台；exec 命令一律拒绝。 */
+    /** 仅允许交互式 shell 请求：menu 用户名进入 TUI 菜单，其余接入实例控制台；exec 一律拒绝。 */
     private static final class ConsoleCommandFactory implements ShellFactory, CommandFactory {
         @Override
         public Command createShell(ChannelSession channel) {
@@ -452,6 +510,13 @@ public final class SshServerHost {
             if (instanceId == null) {
                 SshAudit.bridgeRejected(peerIp(session), "no_authenticated_instance");
                 throw new IllegalStateException("SSH console is not available");
+            }
+            if (MENU_SESSION_ID.equals(instanceId)) {
+                if (!Config.hasMenuPassword()) {
+                    SshAudit.bridgeRejected(peerIp(session), "menu_disabled");
+                    throw new IllegalStateException("SSH menu is not available");
+                }
+                return new MenuTuiCommand();
             }
             Config.InstanceConfig cfg = Config.getInstanceConfig(instanceId);
             if (cfg == null || !cfg.sshEnabled) {

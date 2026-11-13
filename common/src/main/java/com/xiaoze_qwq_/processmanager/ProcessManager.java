@@ -72,8 +72,8 @@ public class ProcessManager {
     }
 
     private static void startEmbeddedSsh(MinecraftServer server) {
-        if (!Config.hasEnabledSshInstance()) {
-            LOGGER.info("No instance has SSH enabled; embedded SSH server not started.");
+        if (!Config.isSshServerNeeded()) {
+            LOGGER.info("No instance has SSH enabled and the SSH menu is not set up; embedded SSH server not started.");
             return;
         }
         try {
@@ -94,7 +94,8 @@ public class ProcessManager {
                 LOGGER.warn("No Minecraft listener channels found; embedded SSH server not installed.");
                 return;
             }
-            LOGGER.info("Embedded SSH server multiplexed over the Minecraft port. Log in with <instance-id-or-name> as the SSH username.");
+            LOGGER.info("Embedded SSH server multiplexed over the Minecraft port. Log in with <instance-id-or-name> as the SSH username"
+                    + (Config.hasMenuPassword() ? ", or 'menu' for the TUI instance menu." : "."));
         } catch (Throwable t) {
             LOGGER.error("Failed to start embedded SSH server", t);
             try {
@@ -124,7 +125,7 @@ public class ProcessManager {
     public static boolean applySshConfigurationChange() {
         MinecraftServer server = serverInstance;
         if (server == null) return false;
-        if (!Config.hasEnabledSshInstance()) {
+        if (!Config.isSshServerNeeded()) {
             stopEmbeddedSsh();
             return true;
         }

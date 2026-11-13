@@ -150,6 +150,24 @@ public class CommandRegistry {
                                 .then(Commands.literal("clear")
                                         .executes(ctx -> executeSshClearDefault(ctx)))));
 
+        var menuNode = Commands.literal("menu")
+                .executes(CommandRegistry::executeMenuStatus)
+                .then(Commands.literal("status").executes(CommandRegistry::executeMenuStatus))
+                .then(Commands.literal("setpassword")
+                        .then(Commands.argument("password", StringArgumentType.greedyString())
+                                .executes(CommandRegistry::executeMenuSetPassword)))
+                .then(Commands.literal("clearpassword")
+                        .executes(CommandRegistry::executeMenuClearPassword));
+        base.then(menuNode);
+
+        var hashNode = Commands.literal("hash")
+                .executes(CommandRegistry::executeHashList)
+                .then(Commands.literal("list").executes(CommandRegistry::executeHashList))
+                .then(Commands.literal("set")
+                        .then(Commands.argument("algorithm", StringArgumentType.word())
+                                .executes(CommandRegistry::executeHashSet)));
+        base.then(hashNode);
+
         base.then(instanceNode);
         base.executes(CommandRegistry::executeHelp);
         dispatcher.register(base);
@@ -776,7 +794,8 @@ public class CommandRegistry {
                 && Config.SSH_AUTH_PASSWORD.equals(Config.normalizeSshAuthMode(cfg.sshAuthMode))) {
             ProcessManager.disconnectSshSessions(id);
         }
-        src.sendSuccess(() -> Component.literal("SSH password for instance " + id + " has been set (bcrypt)."), false);
+        src.sendSuccess(() -> Component.literal("SSH password for instance " + id + " has been set (algorithm: "
+                + Config.getHashAlgorithm() + ")."), false);
         return 1;
     }
 
@@ -925,6 +944,106 @@ public class CommandRegistry {
             return 1;
         }
         src.sendSuccess(() -> Component.literal("Removed SSH public key " + index + " from instance " + id + "."), false);
+        return 1;
+    }
+
+    private static int executeMenuStatus(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.menu")) return errorNoPermission(ctx);
+        boolean enabled = Config.hasMenuPassword();
+        int sessions = SshServerHost.getActiveSessionCount(SshServerHost.MENU_SESSION_ID);
+        String connectHint = enabled
+                ? "Connect with: ssh -p <mc-port> menu@<host>"
+                : "Enable it from the server console with: /pm menu setpassword <password>";
+        src.sendSuccess(() -> Component.literal(
+                "SSH TUI menu: " + (enabled ? "enabled" : "disabled")
+                        + " | hash algorithm: " + Config.getHashAlgorithm()
+                        + " | active menu sessions: " + sessions), false);
+        src.sendSuccess(() -> Component.literal(connectHint), false);
+        src.sendSuccess(() -> Component.literal(
+                "The menu can start/stop/restart instances, view status, send commands and attach consoles; "
+                        + "it can never change any password."), false);
+        return 1;
+    }
+
+    private static int executeMenuSetPassword(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.menu")) return errorNoPermission(ctx);
+        if (!isConsole(src)) {
+            src.sendFailure(Component.literal("For security, set the menu password from the server console only."));
+            return 0;
+        }
+        if (ProcessManager.isLogCommandsEnabled()) {
+            src.sendFailure(Component.literal(
+                    "server.properties log-commands is enabled; the password would be written to the log. Set log-commands=false first."));
+            return 0;
+        }
+        String password = StringArgumentType.getString(ctx, "password");
+        if (password.length() < 12 || password.length() > 64 || password.trim().isEmpty()) {
+            src.sendFailure(Component.literal("Menu password must be 12-64 characters and cannot be blank."));
+            return 0;
+        }
+        if (!Config.setMenuPassword(password)) {
+            src.sendFailure(Component.literal("Failed to set the menu password."));
+            return 0;
+        }
+        SshServerHost.disconnectInstance(SshServerHost.MENU_SESSION_ID);
+        ProcessManager.applySshConfigurationChange();
+        src.sendSuccess(() -> Component.literal(
+                "Menu password set (algorithm: " + Config.getHashAlgorithm()
+                        + "). Existing menu sessions were closed. The menu itself can never change passwords."), false);
+        return 1;
+    }
+
+    private static int executeMenuClearPassword(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.menu")) return errorNoPermission(ctx);
+        if (!isConsole(src)) {
+            src.sendFailure(Component.literal("For security, clear the menu password from the server console only."));
+            return 0;
+        }
+        Config.clearMenuPassword();
+        SshServerHost.disconnectInstance(SshServerHost.MENU_SESSION_ID);
+        ProcessManager.applySshConfigurationChange();
+        src.sendSuccess(() -> Component.literal(
+                "Menu password cleared. SSH username 'menu' is now rejected."), false);
+        return 1;
+    }
+
+    private static int executeHashList(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.hash")) return errorNoPermission(ctx);
+        String current = Config.getHashAlgorithm();
+        StringBuilder sb = new StringBuilder("Registered hash algorithms: ");
+        java.util.List<String> ids = Config.getRegisteredHashAlgorithms();
+        for (int i = 0; i < ids.size(); i++) {
+            if (i > 0) sb.append(", ");
+            String id = ids.get(i);
+            sb.append(id.equals(current) ? id + " (default)" : id);
+        }
+        src.sendSuccess(() -> Component.literal(sb.toString()), false);
+        src.sendSuccess(() -> Component.literal(
+                "New passwords use the default algorithm; existing hashes keep verifying via automatic format detection. "
+                        + "External modules ship as SPI jars, see skills/crypto-module/SKILL.md."), false);
+        return 1;
+    }
+
+    private static int executeHashSet(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.hash")) return errorNoPermission(ctx);
+        if (!isConsole(src)) {
+            src.sendFailure(Component.literal("For security, change the hash algorithm from the server console only."));
+            return 0;
+        }
+        String algorithm = StringArgumentType.getString(ctx, "algorithm");
+        if (!Config.setHashAlgorithm(algorithm)) {
+            src.sendFailure(Component.literal(
+                    "Unknown hash algorithm '" + algorithm + "'. Run /pm hash list to see registered algorithms."));
+            return 0;
+        }
+        src.sendSuccess(() -> Component.literal(
+                "Default hash algorithm set to " + Config.getHashAlgorithm()
+                        + ". Only new passwords use it; existing hashes keep verifying."), false);
         return 1;
     }
 

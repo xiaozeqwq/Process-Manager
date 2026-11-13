@@ -1,18 +1,15 @@
 package com.xiaoze_qwq_.processmanager.config;
 
-import at.favre.lib.crypto.bcrypt.BCrypt;
 import com.moandjiezana.toml.Toml;
 import com.moandjiezana.toml.TomlWriter;
 import com.xiaoze_qwq_.processmanager.ProcessManager;
+import com.xiaoze_qwq_.processmanager.crypto.PasswordCipherRegistry;
 import dev.architectury.platform.Platform;
 
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.PBEKeySpec;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.PosixFilePermission;
-import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.*;
 import java.util.concurrent.*;
@@ -25,11 +22,7 @@ public class Config {
     private static final Path SSH_DEFAULT_FILE = Platform.getConfigFolder().resolve("pm_ssh_default");
     private static volatile byte[] secretKey;
 
-    private static final String PBKDF2_ALGO = "PBKDF2WithHmacSHA512";
-    private static final int PBKDF2_ITERATIONS = 120_000;
-    private static final int SALT_BYTES = 16;
     private static final SecureRandom RNG = new SecureRandom();
-
     public static final int MIN_PASSWORD_LENGTH = 6;
     public static final int MAX_PASSWORD_LENGTH = 128;
 
@@ -45,11 +38,16 @@ public class Config {
 
     private static volatile String passwordHash = "";
 
+    /** SSH 保留用户名：登录后进入 TUI 菜单而不是实例控制台。实例名禁止占用。 */
+    public static final String SSH_MENU_USERNAME = "menu";
+    private static volatile String menuPasswordHash = "";
+
+    /** 新哈希使用的默认算法 id，必须已在 {@link PasswordCipherRegistry} 注册。 */
+    private static volatile String hashAlgorithm = "bcrypt";
+
     private static int verifyMaxAttempts = 5;
     private static int verifyLockoutSeconds = 60;
     private static final Map<UUID, long[]> verifyFailures = new ConcurrentHashMap<>();
-
-    private static final int BCRYPT_COST = 12;
 
     static {
         load();
@@ -119,38 +117,13 @@ public class Config {
         }
     }
 
-    // ==================== 密码管理（PBKDF2 + 随机盐） ====================
-    private static byte[] pbkdf2(char[] password, byte[] salt, int iterations) {
-        try {
-            PBEKeySpec spec = new PBEKeySpec(password, salt, iterations, 512);
-            SecretKeyFactory factory = SecretKeyFactory.getInstance(PBKDF2_ALGO);
-            return factory.generateSecret(spec).getEncoded();
-        } catch (Exception e) {
-            throw new IllegalStateException("PBKDF2 not available", e);
-        }
-    }
-
+    // ==================== 密码管理（算法模块化，自动识别旧格式） ====================
     private static String hashPassword(String plain) {
-        byte[] salt = new byte[SALT_BYTES];
-        RNG.nextBytes(salt);
-        byte[] hash = pbkdf2(plain.toCharArray(), salt, PBKDF2_ITERATIONS);
-        return PBKDF2_ITERATIONS + "$" + Base64.getEncoder().encodeToString(salt)
-                + "$" + Base64.getEncoder().encodeToString(hash);
+        return PasswordCipherRegistry.hash(plain);
     }
 
     private static boolean verifyStoredPassword(String plain, String stored) {
-        if (stored == null || stored.isEmpty()) return false;
-        try {
-            String[] parts = stored.split("\\$");
-            if (parts.length != 3) return false;
-            int iterations = Integer.parseInt(parts[0]);
-            byte[] salt = Base64.getDecoder().decode(parts[1]);
-            byte[] expected = Base64.getDecoder().decode(parts[2]);
-            byte[] actual = pbkdf2(plain.toCharArray(), salt, iterations);
-            return MessageDigest.isEqual(expected, actual);
-        } catch (Exception e) {
-            return false;
-        }
+        return PasswordCipherRegistry.verify(plain, stored);
     }
 
     private static void loadPasswordHash() {
@@ -225,34 +198,21 @@ public class Config {
         verifyFailures.remove(uuid);
     }
 
-    // ==================== 实例 SSH 配置（bcrypt / 公钥） ====================
+    // ==================== 实例 SSH 配置（模块化哈希 / 公钥） ====================
     public static final String SSH_AUTH_PASSWORD = "password";
     public static final String SSH_AUTH_PUBLICKEY = "publickey";
-
-    public static String bcryptHash(String plain) {
-        return BCrypt.with(BCrypt.Version.VERSION_2B).hashToString(BCRYPT_COST, plain.toCharArray());
-    }
-
-    public static boolean bcryptVerify(String plain, String hash) {
-        if (plain == null || hash == null || hash.isEmpty()) return false;
-        try {
-            return BCrypt.verifyer().verify(plain.toCharArray(), hash).verified;
-        } catch (Exception e) {
-            return false;
-        }
-    }
 
     public static String normalizeSshAuthMode(String mode) {
         return SSH_AUTH_PUBLICKEY.equalsIgnoreCase(mode == null ? "" : mode.trim())
                 ? SSH_AUTH_PUBLICKEY : SSH_AUTH_PASSWORD;
     }
 
-    /** 设置某实例的 SSH 密码（bcrypt 哈希后保存到配置）。 */
+    /** 设置某实例的 SSH 密码（用当前默认算法模块哈希后保存到配置）。 */
     public static boolean setInstanceSshPassword(String id, String plain) {
         InstanceConfig cfg = instances.get(id);
         if (cfg == null || plain == null || plain.isEmpty()) return false;
         if (plain.length() < 12 || plain.length() > 64 || plain.trim().isEmpty()) return false;
-        cfg.sshPasswordHash = bcryptHash(plain);
+        cfg.sshPasswordHash = hashPassword(plain);
         saveToml();
         return true;
     }
@@ -268,11 +228,11 @@ public class Config {
         saveToml();
     }
 
-    /** 校验某实例的 SSH 密码。 */
+    /** 校验某实例的 SSH 密码（按存储格式自动识别算法模块）。 */
     public static boolean verifyInstanceSshPassword(String id, String plain) {
         InstanceConfig cfg = instances.get(id);
         if (cfg == null) return false;
-        return bcryptVerify(plain, cfg.sshPasswordHash);
+        return verifyStoredPassword(plain, cfg.sshPasswordHash);
     }
 
     /** 切换某实例的 SSH 认证方式：password 或 publickey。 */
@@ -332,16 +292,83 @@ public class Config {
         return false;
     }
 
-    /** 按 SSH 用户名解析实例：支持实例编号或实例名称（不区分大小写）。 */
+    /** 内嵌 SSH 服务端是否需要启动：任一实例启用 SSH，或菜单密码已设置。 */
+    public static boolean isSshServerNeeded() {
+        return hasEnabledSshInstance() || hasMenuPassword();
+    }
+
+    // ==================== SSH 菜单密码（用户名 menu，独立于所有实例密码） ====================
+
+    /** 菜单是否已启用（菜单密码已设置）。 */
+    public static boolean hasMenuPassword() {
+        return menuPasswordHash != null && !menuPasswordHash.isEmpty();
+    }
+
+    /** 设置菜单密码；仅能在游戏外（服务器控制台命令）调用，TUI 菜单内禁止修改任何密码。 */
+    public static boolean setMenuPassword(String plain) {
+        if (plain == null || plain.isEmpty()) return false;
+        if (plain.length() < 12 || plain.length() > 64 || plain.trim().isEmpty()) return false;
+        menuPasswordHash = hashPassword(plain);
+        saveToml();
+        return true;
+    }
+
+    /** 清除菜单密码：菜单登录随即禁用。 */
+    public static void clearMenuPassword() {
+        menuPasswordHash = "";
+        saveToml();
+    }
+
+    /** 校验菜单密码。 */
+    public static boolean verifyMenuPassword(String plain) {
+        return hasMenuPassword() && verifyStoredPassword(plain, menuPasswordHash);
+    }
+
+    // ==================== 默认哈希算法配置 ====================
+
+    /** 当前生成新哈希使用的算法 id（来自 [hashing] algorithm）。 */
+    public static String getHashAlgorithm() {
+        return PasswordCipherRegistry.getDefaultId();
+    }
+
+    /** 已注册的全部算法 id（含外部 SPI 模块）。 */
+    public static List<String> getRegisteredHashAlgorithms() {
+        return PasswordCipherRegistry.ids();
+    }
+
+    /** 切换默认哈希算法，仅影响之后生成的新密码哈希。 */
+    public static boolean setHashAlgorithm(String id) {
+        if (!PasswordCipherRegistry.setDefault(id)) return false;
+        hashAlgorithm = PasswordCipherRegistry.getDefaultId();
+        saveToml();
+        return true;
+    }
+
+    /** 配置里的算法不可用时回退 bcrypt，保证总能生成新哈希。 */
+    private static void applyHashAlgorithm(String configured) {
+        hashAlgorithm = configured == null || configured.isBlank() ? "bcrypt" : configured.trim();
+        if (!PasswordCipherRegistry.setDefault(hashAlgorithm)) {
+            ProcessManager.LOGGER.warn("Unknown hash algorithm '{}'; falling back to bcrypt.", hashAlgorithm);
+            hashAlgorithm = "bcrypt";
+            PasswordCipherRegistry.setDefault("bcrypt");
+        }
+    }
+
+    /** 按 SSH 用户名解析实例：支持实例编号或实例名称（不区分大小写）。保留用户名 menu 永远不映射到实例。 */
     public static InstanceConfig findSshInstance(String username) {
         if (username == null) return null;
         String value = username.trim();
-        if (value.isEmpty()) return null;
+        if (value.isEmpty() || isMenuUsername(value)) return null;
         if (value.matches("\\d+")) return instances.get(value);
         for (InstanceConfig cfg : instances.values()) {
             if (cfg.name != null && cfg.name.equalsIgnoreCase(value)) return cfg;
         }
         return null;
+    }
+
+    /** 该用户名是否为菜单保留用户名（不区分大小写）。 */
+    public static boolean isMenuUsername(String username) {
+        return username != null && SSH_MENU_USERNAME.equalsIgnoreCase(username.trim());
     }
 
     /** 某实例是否可作为默认实例：已启用 SSH、使用密码认证且已设置密码。 */
@@ -385,8 +412,9 @@ public class Config {
         return true;
     }
 
-    /** 用户名匹配失败时回退到默认实例；公钥认证不使用此回退。 */
+    /** 用户名匹配失败时回退到默认实例；公钥认证不使用此回退。保留用户名 menu 永不回退。 */
     public static InstanceConfig findSshInstanceWithFallback(String username) {
+        if (isMenuUsername(username)) return null;
         InstanceConfig cfg = findSshInstance(username);
         if (cfg != null) return cfg;
         String defaultId = getSshDefaultInstance();
@@ -543,7 +571,7 @@ public class Config {
         public boolean sshEnabled = false;
         /** SSH 认证方式："password" 或 "publickey"。 */
         public String sshAuthMode = SSH_AUTH_PASSWORD;
-        /** SSH 密码的 bcrypt ($2b$) 哈希，加密保存，不存明文。 */
+        /** SSH 密码哈希（算法模块化，格式自带算法前缀，默认 bcrypt $2b$），不存明文。 */
         public String sshPasswordHash = "";
     }
 
@@ -571,6 +599,21 @@ public class Config {
                 if (maxAttempts != null && maxAttempts > 0) verifyMaxAttempts = maxAttempts.intValue();
                 Long lockoutSeconds = verifyTable.getLong("lockoutSeconds");
                 if (lockoutSeconds != null && lockoutSeconds > 0) verifyLockoutSeconds = lockoutSeconds.intValue();
+            }
+
+            Toml hashingTable = toml.getTable("hashing");
+            if (hashingTable != null) {
+                String algorithm = hashingTable.getString("algorithm");
+                if (algorithm != null && !algorithm.isBlank()) {
+                    hashAlgorithm = algorithm.trim();
+                }
+            }
+            applyHashAlgorithm(hashAlgorithm);
+
+            Toml menuTable = toml.getTable("menu");
+            if (menuTable != null) {
+                String menuHash = menuTable.getString("passwordHash");
+                menuPasswordHash = menuHash == null ? "" : menuHash;
             }
 
             defaultConfig = parseInstanceConfig(toml.getTable("default"), "default");
@@ -611,6 +654,12 @@ public class Config {
 
                 if (cfg.name != null && cfg.name.matches("\\d+")) {
                     ProcessManager.LOGGER.error("Instance '{}' has a numeric name '{}'. Please use a non-numeric name.", id, cfg.name);
+                    it.remove();
+                    continue;
+                }
+
+                if (isMenuUsername(cfg.name)) {
+                    ProcessManager.LOGGER.error("Instance '{}' uses the reserved SSH username '{}' as its name. Please rename it. Skipping instance.", id, cfg.name);
                     it.remove();
                     continue;
                 }
@@ -753,6 +802,14 @@ public class Config {
             verify.put("maxAttempts", (long) verifyMaxAttempts);
             verify.put("lockoutSeconds", (long) verifyLockoutSeconds);
             root.put("verify", verify);
+
+            Map<String, Object> hashing = new LinkedHashMap<>();
+            hashing.put("algorithm", PasswordCipherRegistry.getDefaultId());
+            root.put("hashing", hashing);
+
+            Map<String, Object> menu = new LinkedHashMap<>();
+            menu.put("passwordHash", menuPasswordHash == null ? "" : menuPasswordHash);
+            root.put("menu", menu);
 
             root.put("default", instanceToMap(defaultConfig, true));
 

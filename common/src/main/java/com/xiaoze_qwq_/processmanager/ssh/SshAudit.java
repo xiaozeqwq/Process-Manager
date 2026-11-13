@@ -30,6 +30,12 @@ public final class SshAudit {
                 safe(ip), safe(instanceId), durationMillis);
     }
 
+    /** 菜单操作审计：仅记录动作类型与目标实例，不记录命令内容。 */
+    public static void menuAction(String ip, String instanceId, String action) {
+        LOGGER.info("PM-SSH event=menu_action ip={} instance={} action={}",
+                safe(ip), safe(instanceId), safe(action));
+    }
+
     private static String safe(String value) {
         return value == null || value.isEmpty() ? "-" : value;
     }
