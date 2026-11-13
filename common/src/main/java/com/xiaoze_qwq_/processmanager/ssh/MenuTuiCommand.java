@@ -152,8 +152,8 @@ public class MenuTuiCommand implements Command {
             }
         }, 1, 1, TimeUnit.SECONDS);
         synchronized (stateLock) {
-            enqueue(CLEAR_SCREEN);
-            enqueue(HIDE_CURSOR);
+            enqueue(CLEAR_SCREEN.getBytes(StandardCharsets.UTF_8));
+            enqueue(HIDE_CURSOR.getBytes(StandardCharsets.UTF_8));
             renderLocked();
         }
         inputThread = new Thread(this::readLoop, "PM-Menu-Input");
@@ -513,7 +513,7 @@ public class MenuTuiCommand implements Command {
         };
         inst.addConsoleListener(consoleListener);
         SshAudit.menuAction(ip, inst.getId(), "console_attach");
-        enqueue(CLEAR_SCREEN);
+        enqueue(CLEAR_SCREEN.getBytes(StandardCharsets.UTF_8));
         enqueue(("\r\n[attached to instance " + inst.getId() + " console — press Ctrl-A then d to return to the menu]\r\n")
                 .getBytes(StandardCharsets.UTF_8));
     }
@@ -529,7 +529,7 @@ public class MenuTuiCommand implements Command {
             }
             return;
         }
-        if (!ctrlAPending && indexOf(data, length, 0x01) < 0) {
+        if (!ctrlAPending && indexOf(data, length, (byte) 0x01) < 0) {
             byte[] copy = new byte[length];
             System.arraycopy(data, 0, copy, 0, length);
             inst.writeRawInput(copy);
