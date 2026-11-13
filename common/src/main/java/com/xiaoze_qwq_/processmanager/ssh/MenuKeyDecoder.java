@@ -19,6 +19,17 @@ public final class MenuKeyDecoder {
     private int utf8Need = 0;
     private String lastChar = "";
 
+    /** 喂入多个字节（块）；返回最后一个非 null 事件，若无事件返回 null。 */
+    public static Key feedAll(MenuKeyDecoder decoder, byte... bytes) {
+        Key last = null;
+        for (byte b : bytes) {
+            Key key = decoder.feed(b);
+            if (key != null) last = key;
+        }
+        Key pending = decoder.flushPending();
+        return pending != null ? pending : last;
+    }
+
     /** 喂入一个字节；返回 null 表示序列未完成或无事件。 */
     public Key feed(byte b) {
         switch (state) {
