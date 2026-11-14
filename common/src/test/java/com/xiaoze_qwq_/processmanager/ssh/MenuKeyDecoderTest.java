@@ -7,10 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 class MenuKeyDecoderTest {
 
-    private static MenuKeyDecoder.Key feedAll(MenuKeyDecoder decoder, byte... bytes) {
+    private static MenuKeyDecoder.Key feedAll(MenuKeyDecoder decoder, int... bytes) {
         MenuKeyDecoder.Key last = null;
-        for (byte b : bytes) {
-            MenuKeyDecoder.Key key = decoder.feed(b);
+        for (int b : bytes) {
+            MenuKeyDecoder.Key key = decoder.feed((byte) b);
             if (key != null) last = key;
         }
         MenuKeyDecoder.Key pending = decoder.flushPending();
