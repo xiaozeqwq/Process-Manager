@@ -8,14 +8,15 @@ description: 为 Process Manager 模组开发密码哈希算法模块（Password
 本规范面向要为 Process Manager（下称 PM）新增密码哈希算法的开发者或 AI。
 PM 的所有密码（主密码 pmpassword、实例 SSH 密码、SSH 菜单密码）都通过
 `PasswordCipher` 接口哈希与校验。内置算法为 `bcrypt` 与 `pbkdf2-sha512`，
-外部算法以独立 mod jar 形式提供，放入服务器 `mods/` 目录即被
-Java ServiceLoader 自动发现并注册，无需修改 PM 源码。
+外部算法以独立 jar 形式提供，放入服务器根目录下的 `ciphers/` 文件夹即被
+PM 启动时自动发现并注册，无需修改 PM 源码，也无需在 `mods/` 中放置 Mod 元数据。
 
 ## 一、系统工作原理
 
 - 接口：`com.xiaoze_qwq_.processmanager.crypto.PasswordCipher`，由 PM 主模组 jar 在运行时提供。
-- 注册：PM 启动时执行 `ServiceLoader.load(PasswordCipher.class)`，扫描 classpath 上
-  所有 `META-INF/services/com.xiaoze_qwq_.processmanager.crypto.PasswordCipher` 声明。
+- 注册：PM 启动时扫描服务端根目录下的 `ciphers/` 文件夹，对其中每个 jar 创建独立的 `URLClassLoader`，
+  并读取 jar 内的 `META-INF/services/com.xiaoze_qwq_.processmanager.crypto.PasswordCipher` SPI 声明，
+  注册声明的算法实现。单个 jar 加载失败只记录警告，不影响其他 jar 或服务器启动。
 - 新哈希：使用配置 `pm_config.toml` 中 `[hashing] algorithm` 指定的算法生成
   （`/pm hash set <算法>` 可切换）。
 - 旧哈希：校验时按存储字符串前缀自动识别算法（`matches()` / `matchesLegacy()`），
@@ -32,6 +33,49 @@ public interface PasswordCipher {
     boolean verify(String plain, String stored); // 常量时间比较校验
     boolean matches(String stored);       // stored 是否为本算法当前输出格式
     default boolean matchesLegacy(String stored) { return false; } // 历史格式回退识别
+}
+```
+
+## 三、项目模板
+
+纯 Java 21 项目即可，无需 Architectury Loom。目录结构：
+
+```
+pm-cipher-argon2id/
+├── build.gradle
+├── settings.gradle
+└── src/
+    └── main/
+        ├── java/com/example/pmcipher/Argon2IdCipher.java
+        └── resources/
+            └── META-INF/services/com.xiaoze_qwq_.processmanager.crypto.PasswordCipher
+```
+
+`settings.gradle`:
+
+```gradle
+rootProject.name = 'pm-cipher-argon2id'
+```
+
+`build.gradle`（编译期依赖 PM 主模组 jar，运行时由 PM 提供接口，禁止打进产物）：
+
+```gradle
+plugins { id 'java' }
+
+group = 'com.example'
+version = '1.0.0'
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
+}
+
+repositories { mavenCentral() }
+
+dependencies {
+    // 指向从 GitHub Release 下载的 processmanager fat jar，仅参与编译
+    compileOnly files('libs/processmanager-1.0.13.jar')
+    // 模块自身需要的第三方库（如有，需 shadow 重定位到本模块私有包）
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
 }
 ```
 
@@ -92,15 +136,8 @@ repositories { mavenCentral() }
 dependencies {
     // 指向从 GitHub Release 下载的 processmanager fat jar，仅参与编译
     compileOnly files('libs/processmanager-1.0.13.jar')
-    // 模块自身需要的第三方库（如有）
+    // 模块自身需要的第三方库（如有，需 shadow 重定位到本模块私有包）
     implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
-}
-
-processResources {
-    inputs.property 'version', project.version
-    filesMatching(['fabric.mod.json', 'META-INF/neoforge.mods.toml']) {
-        expand version: project.version
-    }
 }
 ```
 
@@ -160,37 +197,6 @@ SPI 声明文件内容（文件名必须是接口全限定名，内容是实现�
 com.example.pmcipher.Argon2IdCipher
 ```
 
-`fabric.mod.json`（让 fabric-loader 把 jar 当作 mod 加载进 classpath）：
-
-```json
-{
-  "schemaVersion": 1,
-  "id": "pm-cipher-argon2id",
-  "version": "${version}",
-  "name": "PM Cipher Argon2id",
-  "environment": "server",
-  "entrypoints": {},
-  "depends": {
-    "fabricloader": ">=0.16.0"
-  }
-}
-```
-
-`META-INF/neoforge.mods.toml`（NeoForge 侧同理；`loaderVersion`/`license` 必填）：
-
-```toml
-modLoader="javafml"
-loaderVersion="[1,)"
-license="All Rights Reserved"
-
-[[mods]]
-modId="pm_cipher_argon2id"
-version="${version}"
-displayName="PM Cipher Argon2id"
-```
-
-注意：两个 mod 元数据里的 `id` 可与算法 id 无关，但不得与服务器上已有 mod 冲突。
-
 ## 四、依赖打包规则（血泪教训，必须遵守）
 
 PM 主模组因 JNA 原生库冲突付出过三个作废版本的代价，模块作者必须吸取：
@@ -207,16 +213,12 @@ PM 主模组因 JNA 原生库冲突付出过三个作废版本的代价，模块
 
 ## 五、构建产物
 
-`gradle build` 产出一个 jar（如 `pm-cipher-argon2id-1.0.0.jar`），放入服务器
-`mods/` 目录（Fabric 与 NeoForge 通用；若使用 shadow 重定位需确认 thin/fat 无关，
-本模块与 PM 的 thin 变体、JNA 依赖包完全无关）。
+`gradle build` 产出一个 jar（如 `pm-cipher-argon2id-1.0.0.jar`）。
 
-## 六、安装与验证清单
+## 六、安装与验证清单（置于服务器根目录）
 
-依次执行并核对：
-
-1. 服务器 `mods/` 放入模块 jar，启动服务端。
-2. 启动日志出现：`PM-Crypto loaded external cipher '<id>' from <类名>`。
+1. 将模块 jar 放入服务器根目录下的 `ciphers/` 文件夹（如不存在则创建）。
+2. 启动服务端，启动日志应出现：`PM-Ext loaded cipher '<id>' from pm-cipher-argon2id-1.0.0.jar`。
 3. 游戏内或控制台执行 `/pm hash list`，新算法 id 出现且 PM 仍正常运行。
 4. 控制台执行 `/pm hash set <新算法id>`。
 5. 控制台执行 `/pm menu setpassword <新密码>`，确认 `pm_config.toml` 的
@@ -225,17 +227,32 @@ PM 主模组因 JNA 原生库冲突付出过三个作废版本的代价，模块
 7. 用新密码 `ssh -p <mc端口> menu@<host>` 登录 TUI 菜单成功。
 8. `/pm hash set bcrypt` 切回，新设密码回到 bcrypt 前缀。
 
-任何一步失败，检查：SPI 文件名拼写、mod 元数据格式、依赖冲突告警、
-NeoForge 是否报模块包冲突。
+任何一步失败，检查：SPI 文件名拼写、jar 是否放在 `ciphers/` 文件夹内（而非 mods/）、
+启动日志中的 PM-Ext 加载警告、第三方库是否发生包冲突。
 
-## 七、安全红线
+## 七、SSH 传输算法自定义（ssh-ext/）
+
+除密码哈希算法外，PM 还支持在服务器根目录下的 `ssh-ext/` 文件夹中放置 SSH 传输自定义 jar，
+用于定制 SSH 握手时的密钥交换（KEX）、会话加密套件、MAC、签名算法、主机密钥规范，
+以及注入全新的 KeyExchangeFactory（例如后量子 KEX）。jar 中需声明
+`META-INF/services/com.xiaoze_qwq_.processmanager.ssh.SshTransportCustomizer`。
+
+打包约束：
+- 与密码算法 jar 相同的 red line：不得打包 `org.apache.sshd`、`com.sun.jna`、`net.i2p.crypto.eddsa`、
+  `com.xiaoze_qwq_.processmanager` 接口类本身。
+- **若 jar 中使用了 `keyExchangeFactory()`，则必须应用与主 Mod 相同的重定位**：
+  `org.apache.sshd` → `com.xiaoze_qwq_.processmanager.shadow.sshd`，并将 sshd-core 声明为 provided scope，
+  以便在运行时链接 PM 已重定位的 SSHD 类；仅需提供算法名称列表或主机密钥规范的 jar
+  则不涉及 sshd 类，无需此重定位。
+
+## 八、安全红线
 
 - 禁止实现任何可逆加密、明文存储或弱哈希（MD5、SHA-1、无盐 SHA-256）。
 - 禁止在 `hash()`/`verify()` 中读取环境变量、系统属性或网络。
 - 禁止静态日志记录任何密码内容；审计日志由 PM 负责且不含密码。
 - 新算法默认迭代/成本参数不得低于对应年份 OWASP 推荐值。
 
-## 八、版本与交付
+## 九、版本与交付
 
 - 语义化版本号；接口行为不变时只升 patch。
 - 交付物：模块 jar + 一份简短 README（算法、参数、格式示例、构建复现步骤）。

@@ -7,7 +7,12 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.xiaoze_qwq_.processmanager.*;
 import com.xiaoze_qwq_.processmanager.config.Config;
+import com.xiaoze_qwq_.processmanager.ext.ExtensionFolderLoader;
+import com.xiaoze_qwq_.processmanager.ext.LoadedExtension;
+import com.xiaoze_qwq_.processmanager.ext.ExtensionStatus;
 import com.xiaoze_qwq_.processmanager.network.CookieGrantPacket;
+import com.xiaoze_qwq_.processmanager.ssh.HostKeySpec;
+import com.xiaoze_qwq_.processmanager.ssh.SshTransportCustomizer;
 import com.xiaoze_qwq_.processmanager.network.OpenStatusScreenPacket;
 import com.xiaoze_qwq_.processmanager.ssh.SshServerHost;
 import net.minecraft.commands.CommandSourceStack;
@@ -166,9 +171,10 @@ public class CommandRegistry {
                 .then(Commands.literal("set")
                         .then(Commands.argument("algorithm", StringArgumentType.word())
                                 .executes(CommandRegistry::executeHashSet)));
-        base.then(hashNode);
-
-        base.then(instanceNode);
+base.then(hashNode);
+        base.then(Commands.literal("ext")
+                .then(Commands.literal("list").executes(CommandRegistry::executeExtList))
+                .executes(CommandRegistry::executeExtList));
         base.executes(CommandRegistry::executeHelp);
         dispatcher.register(base);
     }
@@ -1028,7 +1034,7 @@ public class CommandRegistry {
         return 1;
     }
 
-    private static int executeHashSet(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+private static int executeHashSet(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
         var src = ctx.getSource();
         if (!checkPermission(src, "pm.hash")) return errorNoPermission(ctx);
         if (!isConsole(src)) {
@@ -1047,8 +1053,62 @@ public class CommandRegistry {
         return 1;
     }
 
-    private static int executeHelp(CommandContext<CommandSourceStack> ctx) {
-        ctx.getSource().sendSuccess(() -> Component.translatable("pm.help.title"), false);
+    private static int executeExtList(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        if (!checkPermission(src, "pm.ext")) return errorNoPermission(ctx);
+        StringBuilder sb = new StringBuilder();
+        List<LoadedExtension> exts = com.xiaoze_qwq_.processmanager.ext.ExtensionFolderLoader.getLoadedExtensions();
+        sb.append("Loaded extension jars:\n");
+        if (exts.isEmpty()) {
+            sb.append("  (none)\n");
+        } else {
+            for (LoadedExtension ext : exts) {
+                sb.append("  - ").append(ext.jarName())
+                        .append(" [folder=").append(ext.folder())
+                        .append(", status=").append(ext.status());
+                if (ext.status() == ExtensionStatus.SUCCESS) {
+                    if ("ciphers".equals(ext.folder())) {
+                        sb.append(", cipher ids=").append(ext.cipherIds().isEmpty() ? "(none)" : ext.cipherIds());
+                    } else if ("ssh-ext".equals(ext.folder())) {
+                        sb.append(", transport id=").append(ext.transportId());
+                    }
+                } else {
+                    sb.append(", error=").append(ext.error());
+                }
+                sb.append("]\n");
+            }
+        }
+        sb.append("\nEffective transport algorithms:\n");
+        List<SshTransportCustomizer> customizers = com.xiaoze_qwq_.processmanager.ext.ExtensionFolderLoader.getTransportCustomizers();
+        if (customizers.isEmpty()) {
+            sb.append("  (using built-in sshd 2.13.2 defaults)\n");
+        } else {
+            for (SshTransportCustomizer c : customizers) {
+                sb.append("  - ").append(c.id()).append(":\n");
+                if (!c.kexAlgorithms().isEmpty()) {
+                    sb.append("    KEX: ").append(c.kexAlgorithms()).append("\n");
+                }
+                if (!c.cipherAlgorithms().isEmpty()) {
+                    sb.append("    cipher: ").append(c.cipherAlgorithms()).append("\n");
+                }
+                if (!c.macAlgorithms().isEmpty()) {
+                    sb.append("    MAC: ").append(c.macAlgorithms()).append("\n");
+                }
+                if (!c.signatureAlgorithms().isEmpty()) {
+                    sb.append("    signature: ").append(c.signatureAlgorithms()).append("\n");
+                }
+                HostKeySpec spec = c.hostKey();
+                if (spec != null) {
+                    sb.append("    host key: ").append(spec.algorithm()).append(" key size=").append(spec.keySize())
+                            .append(" file=").append(spec.fileName()).append("\n");
+                }
+                Object kef = c.keyExchangeFactory();
+                if (kef != null) {
+                    sb.append("    key exchange factory installed\n");
+                }
+            }
+        }
+        src.sendSuccess(() -> Component.literal(sb.toString()), false);
         return 1;
     }
 
