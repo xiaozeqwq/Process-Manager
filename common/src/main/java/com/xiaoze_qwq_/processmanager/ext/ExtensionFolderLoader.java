@@ -162,6 +162,16 @@ public final class ExtensionFolderLoader {
         CUSTOMIZERS.clear();
     }
 
+    @SuppressWarnings("unchecked")
+    private static Class<?> spiClass(String spiResourceName) throws ClassNotFoundException {
+        String className = switch (spiResourceName) {
+            case PASSWORD_CIPHER_SPI -> "com.xiaoze_qwq_.processmanager.crypto.PasswordCipher";
+            case SSH_TRANSPORT_CUSTOMIZER_SPI -> "com.xiaoze_qwq_.processmanager.ssh.SshTransportCustomizer";
+            default -> spiResourceName;
+        };
+        return Class.forName(className, false, ExtensionFolderLoader.class.getClassLoader());
+    }
+
     private static void logSummary() {
         LOGGER.info("PM-Ext extension scan complete: {} jars processed",
                 LOADED.size());

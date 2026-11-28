@@ -5,6 +5,8 @@ import com.xiaoze_qwq_.processmanager.ProcessInstance;
 import com.xiaoze_qwq_.processmanager.ProcessManager;
 import com.xiaoze_qwq_.processmanager.config.Config;
 import com.xiaoze_qwq_.processmanager.crypto.PasswordCipherRegistry;
+import com.xiaoze_qwq_.processmanager.ext.ExtensionFolderLoader;
+import com.xiaoze_qwq_.processmanager.ssh.SshTransportCustomizer;
 import dev.architectury.platform.Platform;
 import org.apache.sshd.core.CoreModuleProperties;
 import org.apache.sshd.server.SshServer;
@@ -178,21 +180,19 @@ public final class SshServerHost {
         List<String> mac = ExtensionFolderLoader.mergeAlgorithmLists(customizers, SshTransportCustomizer::macAlgorithms);
         List<String> sig = ExtensionFolderLoader.mergeAlgorithmLists(customizers, SshTransportCustomizer::signatureAlgorithms);
 
+        // 注意：sshd 2.13.2 不暴露可设置的算法列表属性（KEX/CIPHER/MAC/SIGN），因此合并后的算法列表
+        // 仅在日志中输出供运维核对，实际协商仍使用 sshd 内置默认算法。若需要修改协商算法，需升级 sshd-core。
         if (!kex.isEmpty()) {
-            CoreModuleProperties.KEX_ALGORITHMS.set(sshd, String.join(",", kex));
-            LOGGER.info("PM-Ext effective KEX algorithms: {}", kex);
+            LOGGER.info("PM-Ext merged KEX algorithms (not applied to sshd 2.13.2): {}", kex);
         }
         if (!cipher.isEmpty()) {
-            CoreModuleProperties.CIPHER_ALGORITHMS.set(sshd, String.join(",", cipher));
-            LOGGER.info("PM-Ext effective cipher algorithms: {}", cipher);
+            LOGGER.info("PM-Ext merged cipher algorithms (not applied to sshd 2.13.2): {}", cipher);
         }
         if (!mac.isEmpty()) {
-            CoreModuleProperties.MAC_ALGORITHMS.set(sshd, String.join(",", mac));
-            LOGGER.info("PM-Ext effective MAC algorithms: {}", mac);
+            LOGGER.info("PM-Ext merged MAC algorithms (not applied to sshd 2.13.2): {}", mac);
         }
         if (!sig.isEmpty()) {
-            CoreModuleProperties.SIGN_ALGORITHMS.set(sshd, String.join(",", sig));
-            LOGGER.info("PM-Ext effective signature algorithms: {}", sig);
+            LOGGER.info("PM-Ext merged signature algorithms (not applied to sshd 2.13.2): {}", sig);
         }
 
         // 自定义主机密钥（首个非 null 者生效）

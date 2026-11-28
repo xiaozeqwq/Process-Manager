@@ -175,7 +175,10 @@ base.then(hashNode);
         base.then(Commands.literal("ext")
                 .then(Commands.literal("list").executes(CommandRegistry::executeExtList))
                 .executes(CommandRegistry::executeExtList));
-        base.executes(CommandRegistry::executeHelp);
+        base.executes(ctx -> {
+            ctx.getSource().sendSuccess(() -> Component.translatable("pm.help.title"), false);
+            return 1;
+        });
         dispatcher.register(base);
     }
 
