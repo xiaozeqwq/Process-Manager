@@ -67,8 +67,8 @@ public final class ExtensionFolderLoader {
         return new ArrayList<>(CUSTOMIZERS.values());
     }
 
-    /** 按 jar 名字典序合并所有自定义器贡献的算法列表：首个非空值获胜，后续值被忽略。
-     *  返回空列表表示回退至 sshd 内置默认。 */
+    /** 按输入顺序拼接所有自定义器贡献的非空算法列表：排在前面的算法协商优先级更高。
+      *  返回空列表表示回退至 sshd 内置默认。 */
     public static List<String> mergeAlgorithmLists(List<SshTransportCustomizer> customizers,
                                                   java.util.function.Function<SshTransportCustomizer, List<String>> extractor) {
         List<String> merged = new ArrayList<>();
@@ -82,7 +82,8 @@ public final class ExtensionFolderLoader {
         return merged;
     }
 
-    private static void loadFolder(Path folder, String spiResourceName, String folderName) {
+    /** 包内可见，便于单元测试直接调用。 */
+    static void loadFolder(Path folder, String spiResourceName, String folderName) {
         if (!Files.isDirectory(folder)) {
             LOGGER.debug("Extension folder {} does not exist; skip scanning", folder);
             return;
@@ -103,7 +104,8 @@ public final class ExtensionFolderLoader {
         }
     }
 
-    private static void loadJar(Path jar, String spiResourceName, String folderName) {
+    /** 包内可见，便于单元测试直接调用。 */
+    static void loadJar(Path jar, String spiResourceName, String folderName) {
         String jarName = jar.getFileName().toString();
         LOGGER.debug("Loading extension jar {} from folder {}", jarName, folderName);
         List<String> registeredIds = new ArrayList<>();
