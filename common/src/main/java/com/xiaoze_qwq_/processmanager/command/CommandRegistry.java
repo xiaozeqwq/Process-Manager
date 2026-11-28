@@ -1056,7 +1056,7 @@ private static int executeHashSet(CommandContext<CommandSourceStack> ctx) throws
         return 1;
     }
 
-    private static int executeExtList(CommandContext<CommandSourceStack> ctx) {
+    private static int executeExtList(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
         var src = ctx.getSource();
         if (!checkPermission(src, "pm.ext")) return errorNoPermission(ctx);
         StringBuilder sb = new StringBuilder();
