@@ -18,7 +18,7 @@
    - [x] 4.1 在 sshd.start() 前收集 LoadedExtension 记录
    - [x] 4.2 按 jar 名字典序合并自定义算法列表，首个非空值获胜，空值回退 sshd 内置默认；仅在合并结果非空时设置 CoreModuleProperties.KEX_ALGORITHMS / CIPHER_ALGORITHMS / MAC_ALGORITHMS / SIGN_ALGORITHMS
    - [x] 4.3 处理主机密钥（HostKeySpec → SimpleGeneratorHostKeyProvider，algorithm 映射 EC/RSA/Ed25519，keySize 校验，fileName 含算法标识以避免与 pm_ssh_hostkey_ec.ser 冲突）
-   - [x] 4.4 注入 key exchange factory：任意非 null 的 keyExchangeFactory 在 sshd.start() 前通过 sshd.setKeyExchangeFactory 设置；多自定义器时取第一个非 null
+   - [x] 4.4 注入 key exchange factory（已移除）：sshd 2.13.2 不暴露可设置的 KeyExchangeFactory，全新的 KEX 算法需升级 sshd-core 版本；接口仅保留算法名称列表自定义与主机密钥自定义两项
 
 - [x] 5. 新增 /pm ext list 命令
    - [x] 5.1 在 CommandRegistry 注册新命令 /pm ext list

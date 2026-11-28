@@ -1102,10 +1102,6 @@ private static int executeHashSet(CommandContext<CommandSourceStack> ctx) throws
                     sb.append("    host key: ").append(spec.algorithm()).append(" key size=").append(spec.keySize())
                             .append(" file=").append(spec.fileName()).append("\n");
                 }
-                Object kef = c.keyExchangeFactory();
-                if (kef != null) {
-                    sb.append("    key exchange factory installed\n");
-                }
             }
         }
         src.sendSuccess(() -> Component.literal(sb.toString()), false);

@@ -233,17 +233,15 @@ PM 主模组因 JNA 原生库冲突付出过三个作废版本的代价，模块
 ## 七、SSH 传输算法自定义（ssh-ext/）
 
 除密码哈希算法外，PM 还支持在服务器根目录下的 `ssh-ext/` 文件夹中放置 SSH 传输自定义 jar，
-用于定制 SSH 握手时的密钥交换（KEX）、会话加密套件、MAC、签名算法、主机密钥规范，
-以及注入全新的 KeyExchangeFactory（例如后量子 KEX）。jar 中需声明
-`META-INF/services/com.xiaoze_qwq_.processmanager.ssh.SshTransportCustomizer`。
+用于定制 SSH 握手时的密钥交换（KEX）、会话加密套件、MAC、签名算法与主机密钥规范。
+jar 中需声明 `META-INF/services/com.xiaoze_qwq_.processmanager.ssh.SshTransportCustomizer`。
 
 打包约束：
 - 与密码算法 jar 相同的 red line：不得打包 `org.apache.sshd`、`com.sun.jna`、`net.i2p.crypto.eddsa`、
   `com.xiaoze_qwq_.processmanager` 接口类本身。
-- **若 jar 中使用了 `keyExchangeFactory()`，则必须应用与主 Mod 相同的重定位**：
-  `org.apache.sshd` → `com.xiaoze_qwq_.processmanager.shadow.sshd`，并将 sshd-core 声明为 provided scope，
-  以便在运行时链接 PM 已重定位的 SSHD 类；仅需提供算法名称列表或主机密钥规范的 jar
-  则不涉及 sshd 类，无需此重定位。
+
+注意：当前 sshd 2.13.2 不支持设置自定义 KeyExchangeFactory，因此全新的 KEX 算法（如后量子 KEX）
+需先升级 sshd-core 版本；ssh-ext jar 目前可自定义算法名称列表与主机密钥规范两项。
 
 ## 八、安全红线
 

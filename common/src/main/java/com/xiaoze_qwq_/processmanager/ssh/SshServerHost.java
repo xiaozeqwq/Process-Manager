@@ -16,7 +16,6 @@ import org.apache.sshd.server.command.CommandFactory;
 import org.apache.sshd.server.config.keys.AuthorizedKeysAuthenticator;
 import org.apache.sshd.server.forward.RejectAllForwardingFilter;
 import org.apache.sshd.server.keyprovider.SimpleGeneratorHostKeyProvider;
-import org.apache.sshd.server.kex.KeyExchangeFactory;
 import org.apache.sshd.server.session.ServerSession;
 import org.apache.sshd.server.shell.ShellFactory;
 import org.apache.sshd.common.AttributeRepository;
@@ -204,16 +203,8 @@ public final class SshServerHost {
                 break;
             }
         }
-
-        // 自定义 KEX factory（首个非 null 者生效）
-        for (SshTransportCustomizer c : customizers) {
-            KeyExchangeFactory factory = c.keyExchangeFactory();
-            if (factory != null) {
-                sshd.setKeyExchangeFactory(factory);
-                LOGGER.info("PM-Ext installed key exchange factory from customizer '{}'", c.id());
-                break;
-            }
-        }
+        // 注意：sshd 2.13.2 不暴露可设置的 KeyExchangeFactory，因此全新的 KEX 算法（如后量子 KEX）
+        // 需升级 sshd-core 版本才能接入；此处仅保留算法名称列表自定义与主机密钥自定义两项。
     }
 
     private void applyHostKeySpec(HostKeySpec spec) {

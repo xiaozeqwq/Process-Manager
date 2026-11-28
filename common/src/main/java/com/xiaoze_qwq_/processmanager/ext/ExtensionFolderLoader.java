@@ -2,6 +2,7 @@ package com.xiaoze_qwq_.processmanager.ext;
 
 import com.xiaoze_qwq_.processmanager.crypto.PasswordCipher;
 import com.xiaoze_qwq_.processmanager.crypto.PasswordCipherRegistry;
+import com.xiaoze_qwq_.processmanager.ssh.SshTransportCustomizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
