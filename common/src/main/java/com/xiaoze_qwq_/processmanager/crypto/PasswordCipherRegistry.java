@@ -8,11 +8,11 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.ServiceLoader;
 
 /**
  * 密码哈希算法注册表。内置 bcrypt 与 PBKDF2-SHA512 两个实现，
- * 并通过 Java SPI（META-INF/services）加载第三方 mod jar 提供的算法模块。
+ * 并通过 ExtensionFolderLoader 扫描服务端根目录下的 ciphers/ 文件夹
+ * 加载第三方扩展 jar 提供的算法模块。
  *
  * <p>新哈希使用 {@link #getDefault()} 指向的算法（由配置 [hashing] algorithm 决定），
  * 校验时按存储格式自动识别算法，因此更换算法后旧哈希仍可校验。</p>
@@ -25,7 +25,6 @@ public final class PasswordCipherRegistry {
     static {
         register(new BcryptPasswordCipher());
         register(new Pbkdf2PasswordCipher());
-        loadExternal();
     }
 
     private PasswordCipherRegistry() {
@@ -42,22 +41,10 @@ public final class PasswordCipherRegistry {
         CIPHERS.put(id, cipher);
     }
 
-    /** 扫描 SPI 提供者；单个模块初始化失败不影响其余模块。 */
-    private static void loadExternal() {
-        try {
-            for (PasswordCipher cipher : ServiceLoader.load(PasswordCipher.class,
-                    PasswordCipher.class.getClassLoader())) {
-                try {
-                    register(cipher);
-                    LOGGER.info("PM-Crypto loaded external cipher '{}' from {}",
-                            cipher.id(), cipher.getClass().getName());
-                } catch (Throwable t) {
-                    LOGGER.warn("PM-Crypto failed to register external cipher {}", cipher.getClass().getName(), t);
-                }
-            }
-        } catch (Throwable t) {
-            LOGGER.warn("PM-Crypto failed to scan external cipher modules", t);
-        }
+    /** 通过 ExtensionFolderLoader 扫描 ciphers/ 文件夹加载扩展算法；
+     *  单个模块初始化失败不影响其余模块。 */
+    public static void loadFromExtensionFolder() {
+        com.xiaoze_qwq_.processmanager.ext.ExtensionFolderLoader.loadAll();
     }
 
     /** 按 id 查找算法，未注册返回 null。 */

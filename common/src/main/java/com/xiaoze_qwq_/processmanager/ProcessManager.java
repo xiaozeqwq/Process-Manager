@@ -36,6 +36,8 @@ public class ProcessManager {
 
     public static void init() {
         NetworkRegistry.register();
+        // 加载 ciphers/ 文件夹下的扩展密码哈希算法
+        com.xiaoze_qwq_.processmanager.crypto.PasswordCipherRegistry.loadFromExtensionFolder();
         CommandRegistrationEvent.EVENT.register((dispatcher, registry, selection) -> CommandRegistry.register(dispatcher));
         LifecycleEvent.SERVER_STARTED.register(ProcessManager::onServerStarted);
         LifecycleEvent.SERVER_STOPPING.register(ProcessManager::onServerStopping);

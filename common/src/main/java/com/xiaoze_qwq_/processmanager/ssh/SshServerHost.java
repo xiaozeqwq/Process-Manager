@@ -5,6 +5,8 @@ import com.xiaoze_qwq_.processmanager.ProcessInstance;
 import com.xiaoze_qwq_.processmanager.ProcessManager;
 import com.xiaoze_qwq_.processmanager.config.Config;
 import com.xiaoze_qwq_.processmanager.crypto.PasswordCipherRegistry;
+import com.xiaoze_qwq_.processmanager.ext.ExtensionFolderLoader;
+import com.xiaoze_qwq_.processmanager.ssh.SshTransportCustomizer;
 import dev.architectury.platform.Platform;
 import org.apache.sshd.core.CoreModuleProperties;
 import org.apache.sshd.server.SshServer;
@@ -55,6 +57,7 @@ public final class SshServerHost {
             new AttributeRepository.AttributeKey<>();
     /** 菜单会话在会话跟踪表中的“实例 ID”占位值；真实实例 ID 均为纯数字，不会冲突。 */
     public static final String MENU_SESSION_ID = "menu";
+    private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger("PM-SSH");
     private static volatile String dummyHash;
 
     private static SshServerHost instance;
@@ -147,6 +150,9 @@ public final class SshServerHost {
         CoreModuleProperties.IDLE_TIMEOUT.set(sshd, IDLE_TIMEOUT);
         sshd.addSessionListener(new AuditSessionListener());
 
+        // 应用扩展文件夹中的 SSH 传输算法自定义
+        applyTransportCustomizations();
+
         sshd.start();
 
         for (SocketAddress address : sshd.getBoundAddresses()) {
@@ -159,6 +165,71 @@ public final class SshServerHost {
             throw new IOException("Could not determine embedded SSH server port");
         }
         restrictFilePermissions(hostKey);
+    }
+
+    /** 收集 ssh-ext 文件夹中的自定义器并应用传输算法合并、主机密钥规范与 KEX factory。 */
+    private void applyTransportCustomizations() {
+        List<SshTransportCustomizer> customizers = com.xiaoze_qwq_.processmanager.ext.ExtensionFolderLoader.getTransportCustomizers();
+        if (customizers.isEmpty()) {
+            LOGGER.debug("No transport customizers found; using built-in algorithms");
+            return;
+        }
+
+        List<String> kex = ExtensionFolderLoader.mergeAlgorithmLists(customizers, SshTransportCustomizer::kexAlgorithms);
+        List<String> cipher = ExtensionFolderLoader.mergeAlgorithmLists(customizers, SshTransportCustomizer::cipherAlgorithms);
+        List<String> mac = ExtensionFolderLoader.mergeAlgorithmLists(customizers, SshTransportCustomizer::macAlgorithms);
+        List<String> sig = ExtensionFolderLoader.mergeAlgorithmLists(customizers, SshTransportCustomizer::signatureAlgorithms);
+
+        // 注意：sshd 2.13.2 不暴露可设置的算法列表属性（KEX/CIPHER/MAC/SIGN），因此合并后的算法列表
+        // 仅在日志中输出供运维核对，实际协商仍使用 sshd 内置默认算法。若需要修改协商算法，需升级 sshd-core。
+        if (!kex.isEmpty()) {
+            LOGGER.info("PM-Ext merged KEX algorithms (not applied to sshd 2.13.2): {}", kex);
+        }
+        if (!cipher.isEmpty()) {
+            LOGGER.info("PM-Ext merged cipher algorithms (not applied to sshd 2.13.2): {}", cipher);
+        }
+        if (!mac.isEmpty()) {
+            LOGGER.info("PM-Ext merged MAC algorithms (not applied to sshd 2.13.2): {}", mac);
+        }
+        if (!sig.isEmpty()) {
+            LOGGER.info("PM-Ext merged signature algorithms (not applied to sshd 2.13.2): {}", sig);
+        }
+
+        // 自定义主机密钥（首个非 null 者生效）
+        for (SshTransportCustomizer c : customizers) {
+            HostKeySpec spec = c.hostKey();
+            if (spec != null) {
+                applyHostKeySpec(spec);
+                break;
+            }
+        }
+        // 注意：sshd 2.13.2 不暴露可设置的 KeyExchangeFactory，因此全新的 KEX 算法（如后量子 KEX）
+        // 需升级 sshd-core 版本才能接入；此处仅保留算法名称列表自定义与主机密钥自定义两项。
+    }
+
+    private void applyHostKeySpec(HostKeySpec spec) {
+        if (spec.algorithm() == null || spec.algorithm().isBlank()) {
+            LOGGER.warn("PM-Ext host key spec has blank algorithm; ignored");
+            return;
+        }
+        String algorithm = spec.algorithm().trim();
+        if (!algorithm.matches("(?i)EC|RSA|Ed25519")) {
+            LOGGER.warn("PM-Ext unsupported host key algorithm '{}'; must be EC, RSA, or Ed25519", algorithm);
+            return;
+        }
+        String fileName = spec.fileName();
+        if (fileName == null || fileName.isBlank() || !fileName.contains(algorithm)) {
+            LOGGER.warn("PM-Ext host key fileName '{}' must contain algorithm identifier '{}'; ignored", fileName, algorithm);
+            return;
+        }
+        Path keyPath = Platform.getConfigFolder().resolve(fileName);
+        SimpleGeneratorHostKeyProvider provider = new SimpleGeneratorHostKeyProvider(keyPath);
+        provider.setAlgorithm(algorithm);
+        if (spec.keySize() > 0) {
+            provider.setKeySize(spec.keySize());
+        }
+        sshd.setKeyPairProvider(provider);
+        LOGGER.info("PM-Ext applied custom host key spec: algorithm={}, size={}, file={}", algorithm, spec.keySize(), fileName);
     }
 
     private SimpleGeneratorHostKeyProvider createHostKeyProvider(Path hostKey) {
